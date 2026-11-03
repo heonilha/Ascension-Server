@@ -15,10 +15,11 @@
 
 namespace asc::proto
 {
-    inline constexpr std::uint16_t kVersion = 1;
+    inline constexpr std::uint16_t kVersion = 2;
     inline constexpr std::uint16_t kMaxPacketSize = 4096;
     inline constexpr std::size_t kNameLength = 32;     // UTF-8, 널 문자 포함
     inline constexpr std::uint8_t kMaxRoomPlayers = 3; // PvE 층 인스턴스 최대 인원(팀원 수)
+    inline constexpr std::uint8_t kMaxPvpPlayers = 16; // PvP 스테이지 최대 인원
     inline constexpr std::uint16_t kDefaultPort = 7777;
     inline constexpr std::uint32_t kServerTickMs = 50; // 서버 틱 20Hz. S_MoveBatch.serverTick × 이 값 = 서버 시간
 
@@ -35,6 +36,29 @@ namespace asc::proto
         S_Correction = 9,
         C_Ping = 10,
         S_Pong = 11,
+        C_Dodge = 12,
+        C_Attack = 13,
+        S_AttackStart = 14,
+        S_HitResult = 15,
+    };
+
+    // 방 종류. 같은 teamCode라도 모드가 다르면 다른 방이다.
+    enum class RoomMode : std::uint8_t
+    {
+        PvE = 0, // 협동 층 인스턴스(최대 3명)
+        PvP = 1, // 대전 스테이지(최대 16명)
+    };
+
+    enum class AttackKind : std::uint8_t
+    {
+        Slam = 1,  // 서버가 내는 범위 공격(PvE 내려찍기 시험 패턴, 이후 수문장 패턴)
+        Slash = 2, // 플레이어 근접 공격(PvP)
+    };
+
+    enum class HitResult : std::uint8_t
+    {
+        Hit = 0,
+        Dodged = 1, // 회피 무적 구간 안에서 맞음 → 정확한 회피
     };
 
     // 클라이언트 애니메이션 상태. 판정에는 쓰지 않고 원격 플레이어 연출에만 쓴다.
@@ -61,6 +85,7 @@ namespace asc::proto
         RoomFull = 1,
         NotLoggedIn = 2,
         AlreadyInRoom = 3,
+        InvalidMode = 4,
     };
 
 #pragma pack(push, 1)
@@ -108,12 +133,22 @@ namespace asc::proto
         std::uint16_t serverVersion;
     };
 
+    // 방 모드별 전투 판정 규칙. 서버가 정해 S_EnterRoom으로 알려 준다.
+    struct ModeRules
+    {
+        std::uint16_t iframeMs;        // 회피 시작부터 무적 시간
+        std::uint16_t rewindCapMs;     // 회피 입력 시각을 도착 시각보다 최대 이만큼 과거로 인정한다
+        std::uint16_t dodgeCooldownMs; // 회피 재사용 대기
+        std::uint16_t attackWindupMs;  // 플레이어 공격 입력 → 서버 명중 시각까지(PvP)
+    };
+
     // ---- 층 인스턴스(방) ----
-    // 같은 teamCode를 보낸 플레이어끼리 같은 층 인스턴스에 들어간다(최대 3명).
+    // 같은 모드·teamCode를 보낸 플레이어끼리 같은 방에 들어간다.
     struct C_EnterRoom
     {
         PacketHeader header;
         std::uint32_t teamCode;
+        RoomMode mode;
     };
 
     // 뒤에 PlayerInfo[count]가 붙는다: 이미 방에 있던 다른 플레이어들.
@@ -122,9 +157,13 @@ namespace asc::proto
         PacketHeader header;
         EnterResult result;
         std::uint32_t teamCode;
+        RoomMode mode;
         std::uint16_t floor;
         Vec3 spawnPosition;
         float spawnYaw;
+        std::uint8_t capacity;
+        ModeRules rules;
+        std::uint32_t serverTimeMs; // 시계 맞추기 첫 추정값
         std::uint8_t count;
     };
 
@@ -174,6 +213,7 @@ namespace asc::proto
     {
         PacketHeader header;
         std::uint32_t clientTimeMs;
+        std::uint32_t lastRttMs; // 직전에 잰 왕복 시간(0 = 아직 없음). 서버는 판정 유예 계산에 쓰고 상한으로 제한한다
     };
 
     struct S_Pong
@@ -181,6 +221,54 @@ namespace asc::proto
         PacketHeader header;
         std::uint32_t clientTimeMs; // C_Ping 값을 그대로 돌려준다 → 왕복 시간 계산
         std::uint32_t serverTimeMs; // 서버 시작 후 경과 시간
+    };
+
+    // ---- 전투 (P1: 서버 판정) ----
+    // 시각은 모두 서버 시계(ServerTimeMs) 기준이다. 클라이언트는 S_Pong으로 추정한 서버 시각을 넣는다.
+    // 서버는 누른 시각을 [도착 시각 - 허용 되감기, 도착 시각]으로 제한해서 쓴다.
+    struct C_Dodge
+    {
+        PacketHeader header;
+        std::uint32_t sequence;
+        std::uint32_t pressServerMs;
+        float yaw;
+    };
+
+    struct C_Attack
+    {
+        PacketHeader header;
+        std::uint32_t sequence;
+        std::uint32_t pressServerMs;
+        float yaw;
+        AttackKind kind;
+    };
+
+    // 서버가 공격을 시작했다. 클라이언트는 hitServerMs에 맞춰 예고를 재생한다(보간 지연 없이).
+    struct S_AttackStart
+    {
+        PacketHeader header;
+        std::uint32_t attackId;
+        std::uint32_t attackerId; // 0 = 서버(몬스터·시험 패턴)
+        AttackKind kind;
+        std::uint32_t startServerMs;
+        std::uint32_t hitServerMs;
+        Vec3 center;
+        float radius;
+        float damage;
+    };
+
+    // 공격 범위 안에 있던 플레이어 한 명의 판정 결과. 방 전체에 보낸다.
+    struct S_HitResult
+    {
+        PacketHeader header;
+        std::uint32_t attackId;
+        std::uint32_t targetId;
+        HitResult result;
+        float damage;
+        float hpAfter;
+        std::uint32_t hitServerMs;
+        std::uint32_t dodgeServerMs; // 판정에 쓴 회피 시각(0 = 없음)
+        std::uint16_t rewindMs;      // 그 회피를 도착 시각보다 얼마나 과거로 인정했는지
     };
 #pragma pack(pop)
 
@@ -191,15 +279,20 @@ namespace asc::proto
     static_assert(sizeof(MoveEntry) == 33);
     static_assert(sizeof(C_Login) == 38);
     static_assert(sizeof(S_Login) == 11);
-    static_assert(sizeof(C_EnterRoom) == 8);
-    static_assert(sizeof(S_EnterRoom) == 28);
+    static_assert(sizeof(ModeRules) == 8);
+    static_assert(sizeof(C_EnterRoom) == 9);
+    static_assert(sizeof(S_EnterRoom) == 42);
     static_assert(sizeof(S_PlayerJoined) == 56);
     static_assert(sizeof(S_PlayerLeft) == 8);
     static_assert(sizeof(C_Move) == 37);
     static_assert(sizeof(S_MoveBatch) == 9);
     static_assert(sizeof(S_Correction) == 20);
-    static_assert(sizeof(C_Ping) == 8);
+    static_assert(sizeof(C_Ping) == 12);
     static_assert(sizeof(S_Pong) == 12);
+    static_assert(sizeof(C_Dodge) == 16);
+    static_assert(sizeof(C_Attack) == 17);
+    static_assert(sizeof(S_AttackStart) == 41);
+    static_assert(sizeof(S_HitResult) == 31);
 
     // 패킷 타입 → PacketId
     template <class T> struct IdOf;
@@ -214,6 +307,10 @@ namespace asc::proto
     template <> struct IdOf<S_Correction> { static constexpr PacketId value = PacketId::S_Correction; };
     template <> struct IdOf<C_Ping> { static constexpr PacketId value = PacketId::C_Ping; };
     template <> struct IdOf<S_Pong> { static constexpr PacketId value = PacketId::S_Pong; };
+    template <> struct IdOf<C_Dodge> { static constexpr PacketId value = PacketId::C_Dodge; };
+    template <> struct IdOf<C_Attack> { static constexpr PacketId value = PacketId::C_Attack; };
+    template <> struct IdOf<S_AttackStart> { static constexpr PacketId value = PacketId::S_AttackStart; };
+    template <> struct IdOf<S_HitResult> { static constexpr PacketId value = PacketId::S_HitResult; };
 
     // 헤더가 채워진 빈 패킷을 만든다. 예: auto p = Make<C_Login>();
     template <class T>

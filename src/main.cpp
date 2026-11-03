@@ -1,4 +1,5 @@
-// ascension_server [--port 7777] [--threads N]
+// ascension_server [--port 7777] [--threads N] [--pve-slam-ms 0]
+//   --pve-slam-ms: PvE 방에서 이 주기로 서버 내려찍기 시험 패턴을 낸다(회피 판정 시험용, 기본 끔)
 #include "AscensionProtocol.h"
 #include "core/Log.h"
 #include "game/RoomManager.h"
@@ -28,18 +29,20 @@ int main(int argc, char** argv)
 {
     std::uint16_t port = asc::proto::kDefaultPort;
     unsigned threads = std::max(1u, std::thread::hardware_concurrency());
+    asc::game::RoomOptions roomOptions;
 
     for (int i = 1; i + 1 < argc; i += 2)
     {
         const std::string_view key = argv[i], value = argv[i + 1];
         if (key == "--port") port = ParseNumber<std::uint16_t>(value, port);
         else if (key == "--threads") threads = std::max(1u, ParseNumber<unsigned>(value, threads));
+        else if (key == "--pve-slam-ms") roomOptions.pveSlamIntervalMs = ParseNumber<std::uint32_t>(value, 0);
     }
 
     try
     {
         asio::io_context io(static_cast<int>(threads));
-        asc::game::RoomManager rooms(io);
+        asc::game::RoomManager rooms(io, roomOptions);
         asc::net::Server server(io, port, rooms);
         server.Start();
 

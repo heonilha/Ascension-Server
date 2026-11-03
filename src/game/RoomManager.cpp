@@ -1,29 +1,29 @@
 #include "game/RoomManager.h"
 
-#include "game/Room.h"
+#include "game/CombatRules.h"
 
 namespace asc::game
 {
-    RoomManager::RoomManager(asio::io_context& io) : io_(io) {}
+    RoomManager::RoomManager(asio::io_context& io, RoomOptions options) : io_(io), options_(options) {}
 
-    std::shared_ptr<Room> RoomManager::Reserve(std::uint32_t teamCode)
+    std::shared_ptr<Room> RoomManager::Reserve(proto::RoomMode mode, std::uint32_t teamCode)
     {
         std::lock_guard lock(mutex_);
-        Entry& entry = rooms_[teamCode];
+        Entry& entry = rooms_[Key(mode, teamCode)];
         if (!entry.room)
         {
-            entry.room = std::make_shared<Room>(io_, teamCode);
+            entry.room = std::make_shared<Room>(io_, mode, teamCode, options_);
             entry.room->Start();
         }
-        if (entry.reserved >= proto::kMaxRoomPlayers) return nullptr;
+        if (entry.reserved >= CapacityFor(mode)) return nullptr;
         ++entry.reserved;
         return entry.room;
     }
 
-    void RoomManager::Release(std::uint32_t teamCode)
+    void RoomManager::Release(proto::RoomMode mode, std::uint32_t teamCode)
     {
         std::lock_guard lock(mutex_);
-        const auto it = rooms_.find(teamCode);
+        const auto it = rooms_.find(Key(mode, teamCode));
         if (it == rooms_.end()) return;
         if (--it->second.reserved <= 0)
         {

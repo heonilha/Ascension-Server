@@ -144,6 +144,21 @@ namespace asc::net
                 pong.clientTimeMs = packet->clientTimeMs;
                 pong.serverTimeMs = ServerTimeMs();
                 Send(ToBuffer(pong));
+                if (room_ && packet->lastRttMs > 0) room_->ReportRtt(id_, packet->lastRttMs);
+                return;
+            }
+            break;
+        case PacketId::C_Dodge:
+            if (const auto packet = Read<C_Dodge>(bytes))
+            {
+                if (room_) room_->Dodge(id_, *packet);
+                return;
+            }
+            break;
+        case PacketId::C_Attack:
+            if (const auto packet = Read<C_Attack>(bytes))
+            {
+                if (room_) room_->Attack(id_, *packet);
                 return;
             }
             break;
@@ -182,16 +197,19 @@ namespace asc::net
             auto reply = Make<S_EnterRoom>();
             reply.result = result;
             reply.teamCode = packet.teamCode;
+            reply.mode = packet.mode;
             Send(ToBuffer(reply, std::span<const PlayerInfo>{}));
         };
 
         if (!loggedIn_) return Reject(EnterResult::NotLoggedIn);
         if (room_) return Reject(EnterResult::AlreadyInRoom);
+        if (packet.mode != RoomMode::PvE && packet.mode != RoomMode::PvP) return Reject(EnterResult::InvalidMode);
 
-        auto room = rooms_.Reserve(packet.teamCode);
+        auto room = rooms_.Reserve(packet.mode, packet.teamCode);
         if (!room) return Reject(EnterResult::RoomFull);
 
         room_ = std::move(room);
+        mode_ = packet.mode;
         teamCode_ = packet.teamCode;
         room_->Enter(shared_from_this()); // 성공 응답(S_EnterRoom)은 방 strand에서 보낸다
     }
@@ -200,7 +218,7 @@ namespace asc::net
     {
         if (!room_) return;
         room_->Leave(id_);
-        rooms_.Release(teamCode_);
+        rooms_.Release(mode_, teamCode_);
         room_.reset();
     }
 }
