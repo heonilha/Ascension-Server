@@ -1,5 +1,6 @@
-// ascension_server [--port 7777] [--threads N] [--pve-slam-ms 0]
+// ascension_server [--port 7777] [--threads N] [--pve-slam-ms 0] [--map data/CombatLab.txt]
 //   --pve-slam-ms: PvE 방에서 이 주기로 서버 내려찍기 시험 패턴을 낸다(회피 판정 시험용, 기본 끔)
+//   --map: 충돌 지형 파일(저장소 루트에서 실행하면 기본값 그대로). none이면 지형 검사를 끈다
 #include "AscensionProtocol.h"
 #include "core/Log.h"
 #include "game/RoomManager.h"
@@ -10,6 +11,8 @@
 #include <algorithm>
 #include <charconv>
 #include <cstdlib>
+#include <memory>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -30,6 +33,7 @@ int main(int argc, char** argv)
     std::uint16_t port = asc::proto::kDefaultPort;
     unsigned threads = std::max(1u, std::thread::hardware_concurrency());
     asc::game::RoomOptions roomOptions;
+    std::string mapPath = "data/CombatLab.txt";
 
     for (int i = 1; i + 1 < argc; i += 2)
     {
@@ -37,7 +41,22 @@ int main(int argc, char** argv)
         if (key == "--port") port = ParseNumber<std::uint16_t>(value, port);
         else if (key == "--threads") threads = std::max(1u, ParseNumber<unsigned>(value, threads));
         else if (key == "--pve-slam-ms") roomOptions.pveSlamIntervalMs = ParseNumber<std::uint32_t>(value, 0);
+        else if (key == "--map") mapPath = value;
     }
+
+    if (mapPath != "none")
+    {
+        std::string error;
+        auto map = asc::game::CollisionMap::Load(mapPath, error);
+        if (!map)
+        {
+            asc::Log("충돌 지형을 읽지 못함: {} (저장소 루트에서 실행하거나 --map 경로를 지정, 끄려면 --map none)", error);
+            return EXIT_FAILURE;
+        }
+        roomOptions.map = std::make_shared<const asc::game::CollisionMap>(std::move(*map));
+        asc::Log("충돌 지형: {} (장애물 {}개)", mapPath, roomOptions.map->Obstacles().size());
+    }
+    else asc::Log("충돌 지형 끔(--map none): 이동·공격을 지형으로 검사하지 않음");
 
     try
     {

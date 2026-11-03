@@ -97,7 +97,7 @@ namespace asc::game
         member.playerId = session->Id();
         member.name = session->Name();
         member.slot = slot;
-        member.position = SpawnPosition(slot);
+        member.position = SpawnPosition(mode_, slot);
         member.lastMoveTime = Clock::now();
         member.history.push_back({ServerTimeMs(), member.position});
 
@@ -153,8 +153,12 @@ namespace asc::game
         const bool inside = std::abs(to.x) <= kArenaHalfWidth && std::abs(to.y) <= kArenaHalfDepth && to.z > -500.f && to.z < 3000.f;
         const float distance = std::hypot(to.x - member->position.x, to.y - member->position.y);
         const bool reachable = distance <= member->moveBudget + kMoveSlack;
+        // 지형: 장애물 안에 서거나 기둥·벽을 뚫고 지나가는 이동은 거부한다. 앞 검사를 통과했을 때만 계산한다.
+        const bool terrainOk = !finite || !inside || !reachable || !options_.map ||
+                               (!options_.map->Blocked(to, kTerrainRadius) &&
+                                !options_.map->SweepBlocked(member->position, to, kTerrainSweepRadius));
 
-        if (!finite || !inside || !reachable)
+        if (!finite || !inside || !reachable || !terrainOk)
         {
             // 거부: 마지막으로 인정한 위치로 되돌리게 한다. 대기 중인 이동이 연달아 거부되므로 0.2초에 한 번만 보낸다.
             if (now - member->lastCorrectionTime > std::chrono::milliseconds(200))
@@ -164,7 +168,8 @@ namespace asc::game
                 correction.sequence = packet.sequence;
                 correction.position = member->position;
                 member->session->Send(net::ToBuffer(correction));
-                Log("방 {} 이동 거부: {} (이동 {:.0f}cm, 허용 {:.0f}cm, 범위 {})", teamCode_, member->name, distance, member->moveBudget, inside);
+                Log("방 {} 이동 거부: {} (이동 {:.0f}cm, 허용 {:.0f}cm, 범위 {}, 지형 {})", teamCode_, member->name, distance, member->moveBudget,
+                    inside, terrainOk ? "통과" : "막힘");
             }
             return;
         }
@@ -220,17 +225,18 @@ namespace asc::game
         const float radians = packet.yaw * std::numbers::pi_v<float> / 180.f;
         const Vec3 center{member->position.x + kSlashReach * std::cos(radians), member->position.y + kSlashReach * std::sin(radians),
                           member->position.z};
-        StartAttack(playerId, AttackKind::Slash, center, kSlashRadius, kSlashDamage, nowMs, nowMs + rules_.attackWindupMs);
+        StartAttack(playerId, AttackKind::Slash, member->position, center, kSlashRadius, kSlashDamage, nowMs, nowMs + rules_.attackWindupMs);
     }
 
-    void Room::StartAttack(std::uint32_t attackerId, AttackKind kind, Vec3 center, float radius, float damage, std::uint32_t startMs,
-                           std::uint32_t hitMs)
+    void Room::StartAttack(std::uint32_t attackerId, AttackKind kind, Vec3 origin, Vec3 center, float radius, float damage,
+                           std::uint32_t startMs, std::uint32_t hitMs)
     {
         ActiveAttack attack;
         attack.attackId = nextAttackId_++;
         attack.attackerId = attackerId;
         attack.kind = kind;
         attack.hitMs = hitMs;
+        attack.origin = origin;
         attack.center = center;
         attack.radius = radius;
         attack.damage = damage;
@@ -256,7 +262,7 @@ namespace asc::game
         {
             nextSlamMs_ = nowMs + options_.pveSlamIntervalMs;
             const Member& target = members_[slamTarget_++ % members_.size()];
-            StartAttack(0, AttackKind::Slam, target.position, kSlamRadius, kSlamDamage, nowMs, nowMs + kSlamWindupMs);
+            StartAttack(0, AttackKind::Slam, target.position, target.position, kSlamRadius, kSlamDamage, nowMs, nowMs + kSlamWindupMs);
         }
 
         // 판정 유예: 플레이어마다 "명중 시각 + 허용 되감기"가 지나야 확정한다.
@@ -283,6 +289,12 @@ namespace asc::game
         const Vec3 position = PositionAt(member, attack.hitMs + oneWayMs);
         const float distance = std::hypot(position.x - attack.center.x, position.y - attack.center.y);
         if (distance > attack.radius + kBodyRadius) return;
+        // 엄폐: 공격 시작점과 대상 사이를 기둥·벽이 가리면 맞지 않는다(클라이언트 1인 모드의 시야 검사와 같은 원칙).
+        if (options_.map && options_.map->LineBlocked(attack.origin, position))
+        {
+            Log("방 {} 판정: 공격 {} → {} 엄폐로 빗나감", teamCode_, attack.attackId, member.name);
+            return;
+        }
 
         const auto dodge = std::ranges::find_if(member.dodges, [&](const DodgeRecord& d) { return InIframe(rules_, d.serverMs, attack.hitMs); });
 
@@ -381,9 +393,9 @@ namespace asc::game
         return -1;
     }
 
-    Vec3 Room::SpawnPosition(int slot) const
+    Vec3 Room::SpawnPosition(RoomMode mode, int slot)
     {
-        if (mode_ == RoomMode::PvP)
+        if (mode == RoomMode::PvP)
         {
             // 맵 중앙을 둘러싼 반지름 6m 원 위에 고르게 세운다.
             const float angle = 2.f * std::numbers::pi_v<float> * static_cast<float>(slot) / static_cast<float>(kMaxPvpPlayers);
