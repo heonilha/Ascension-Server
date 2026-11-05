@@ -130,11 +130,20 @@ namespace asc::net
         case PacketId::C_EnterRoom:
             if (const auto packet = Read<C_EnterRoom>(bytes)) return HandleEnterRoom(*packet);
             break;
-        case PacketId::C_Move:
-            if (const auto packet = Read<C_Move>(bytes))
+        case PacketId::C_Input:
+            if (bytes.size() >= sizeof(C_Input))
             {
-                if (room_) room_->Move(id_, *packet);
-                return;
+                // 가변 길이: 고정 부분 + InputCommand[count]
+                C_Input packet;
+                std::memcpy(&packet, bytes.data(), sizeof(packet));
+                if (packet.count > 0 && packet.count <= kMaxInputsPerPacket &&
+                    bytes.size() == sizeof(packet) + packet.count * sizeof(InputCommand))
+                {
+                    std::vector<InputCommand> commands(packet.count);
+                    std::memcpy(commands.data(), bytes.data() + sizeof(packet), packet.count * sizeof(InputCommand));
+                    if (room_) room_->Input(id_, packet, std::move(commands));
+                    return;
+                }
             }
             break;
         case PacketId::C_Ping:

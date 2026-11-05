@@ -2,15 +2,16 @@
 
 #include <algorithm>
 #include <cmath>
-#include <fstream>
 #include <format>
-#include <limits>
+#include <fstream>
 #include <sstream>
 
 namespace asc::game
 {
     namespace
     {
+        using move::Vec2;
+
         Vec2 Flat(const proto::Vec3& v) { return {v.x, v.y}; }
         float Cross(Vec2 a, Vec2 b) { return a.x * b.y - a.y * b.x; }
         Vec2 Sub(Vec2 a, Vec2 b) { return {a.x - b.x, a.y - b.y}; }
@@ -24,73 +25,41 @@ namespace asc::game
             error = std::format("{} 파일을 열 수 없음", path);
             return std::nullopt;
         }
+        std::stringstream text;
+        text << file.rdbuf();
 
         CollisionMap map;
-        int version = 0;
-        std::string line;
-        for (int lineNumber = 1; std::getline(file, line); ++lineNumber)
+        std::string parseError;
+        if (!move::ParseWorld(text.str(), map.world_, parseError))
         {
-            if (line.empty() || line[0] == '#') continue;
-            std::istringstream in(line);
-            std::string kind;
-            in >> kind;
-            if (kind == "version") in >> version;
-            else if (kind == "step_height") in >> map.stepHeight_;
-            else if (kind == "obstacle")
+            error = std::format("{}: {}", path, parseError);
+            return std::nullopt;
+        }
+        // 반시계 볼록 다각형인지 확인한다(판정 코드가 이 가정을 쓴다).
+        for (const move::Obstacle& o : map.world_.obstacles)
+        {
+            const std::size_t n = o.polygon.size();
+            for (std::size_t i = 0; i < n; ++i)
             {
-                Obstacle obstacle;
-                int blocking = 0;
-                std::size_t count = 0;
-                in >> obstacle.name >> blocking >> obstacle.zMin >> obstacle.zMax >> count;
-                obstacle.blocking = blocking != 0;
-                obstacle.polygon.resize(count);
-                for (Vec2& v : obstacle.polygon) in >> v.x >> v.y;
-                // 반시계 볼록 다각형인지 확인한다(판정 코드가 이 가정을 쓴다).
-                bool convex = count >= 3;
-                for (std::size_t i = 0; convex && i < count; ++i)
+                if (Cross(Sub(o.polygon[(i + 1) % n], o.polygon[i]), Sub(o.polygon[(i + 2) % n], o.polygon[(i + 1) % n])) < -1e-3f)
                 {
-                    const Vec2 a = obstacle.polygon[i], b = obstacle.polygon[(i + 1) % count], c = obstacle.polygon[(i + 2) % count];
-                    convex = Cross(Sub(b, a), Sub(c, b)) > -1e-3f;
-                }
-                if (!in || !convex)
-                {
-                    error = std::format("{}:{} 장애물 형식 오류 또는 반시계 볼록 다각형이 아님", path, lineNumber);
+                    error = std::format("{}: {}이 반시계 볼록 다각형이 아님", path, o.name);
                     return std::nullopt;
                 }
-                map.obstacles_.push_back(std::move(obstacle));
             }
-        }
-        if (version != 1 || map.obstacles_.empty())
-        {
-            error = std::format("{}: 버전 {} 또는 장애물 없음", path, version);
-            return std::nullopt;
         }
         return map;
     }
 
-    bool CollisionMap::Relevant(const Obstacle& obstacle, float centerZ) const
+    bool CollisionMap::Relevant(const move::Obstacle& obstacle, float centerZ) const
     {
         // 오를 수 없고, 캡슐 높이 범위와 겹치는 장애물만 막는다(머리 위 상인방·제단 덮개는 통과).
-        return obstacle.blocking && obstacle.zMin < centerZ + kCharacterHalfHeight && obstacle.zMax > centerZ - kCharacterHalfHeight;
-    }
-
-    float CollisionMap::SignedDistance(Vec2 p, const std::vector<Vec2>& polygon)
-    {
-        bool inside = true;
-        float best = std::numeric_limits<float>::max();
-        for (std::size_t i = 0; i < polygon.size(); ++i)
-        {
-            const Vec2 a = polygon[i], e = Sub(polygon[(i + 1) % polygon.size()], a), ap = Sub(p, a);
-            if (Cross(e, ap) < 0.f) inside = false;
-            const float t = std::clamp((ap.x * e.x + ap.y * e.y) / (e.x * e.x + e.y * e.y), 0.f, 1.f);
-            best = std::min(best, std::hypot(ap.x - t * e.x, ap.y - t * e.y));
-        }
-        return inside ? -best : best;
+        return obstacle.blocking && obstacle.zMin < centerZ + move::kHalfHeight && obstacle.zMax > centerZ - move::kHalfHeight;
     }
 
     bool CollisionMap::SegmentHitsPolygon(Vec2 a, Vec2 b, const std::vector<Vec2>& polygon)
     {
-        if (SignedDistance(a, polygon) <= 0.f || SignedDistance(b, polygon) <= 0.f) return true;
+        if (move::SignedDistance(a, polygon) <= 0.f || move::SignedDistance(b, polygon) <= 0.f) return true;
         const Vec2 d = Sub(b, a);
         for (std::size_t i = 0; i < polygon.size(); ++i)
         {
@@ -107,7 +76,8 @@ namespace asc::game
     bool CollisionMap::Blocked(const proto::Vec3& center, float radius) const
     {
         const Vec2 p = Flat(center);
-        return std::ranges::any_of(obstacles_, [&](const Obstacle& o) { return Relevant(o, center.z) && SignedDistance(p, o.polygon) < radius; });
+        return std::ranges::any_of(world_.obstacles,
+                                   [&](const move::Obstacle& o) { return Relevant(o, center.z) && move::SignedDistance(p, o.polygon) < radius; });
     }
 
     bool CollisionMap::SweepBlocked(const proto::Vec3& from, const proto::Vec3& to, float radius) const
@@ -126,6 +96,7 @@ namespace asc::game
     bool CollisionMap::LineBlocked(const proto::Vec3& from, const proto::Vec3& to) const
     {
         const float z = std::max(from.z, to.z);
-        return std::ranges::any_of(obstacles_, [&](const Obstacle& o) { return Relevant(o, z) && SegmentHitsPolygon(Flat(from), Flat(to), o.polygon); });
+        return std::ranges::any_of(world_.obstacles,
+                                   [&](const move::Obstacle& o) { return Relevant(o, z) && SegmentHitsPolygon(Flat(from), Flat(to), o.polygon); });
     }
 }
