@@ -147,10 +147,10 @@ namespace asc::game
         Member* member = Find(playerId);
         if (!member) return;
 
-        // 처리권: 실제 시간만큼 쌓인다. 입력을 더 빨리 보내도(속도 조작) 초당 60틱 넘게 움직일 수 없다.
+        // 처리권: 실제 시간만큼 쌓인다. 입력을 더 빨리 보내도(속도 조작) 초당 약 62틱(60 × 1.03) 넘게 움직일 수 없다.
         const auto now = Clock::now();
         member->inputCredits = std::min(kMaxInputBacklog,
-                                        member->inputCredits + std::chrono::duration<double>(now - member->creditTime).count() * move::kTickRate);
+                                        member->inputCredits + std::chrono::duration<double>(now - member->creditTime).count() * move::kTickRate * kInputRateTolerance);
         member->creditTime = now;
 
         static const move::World kEmptyWorld;
