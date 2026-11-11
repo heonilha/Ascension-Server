@@ -1,9 +1,11 @@
 # Ascension-Server
 
-「각성과 탐욕의 탑」 전용 게임 서버. 클라이언트 저장소(Ascension-Team)와는 **프로토콜 파일만** 공유한다.
+「각성과 탐욕의 탑」 전용 게임 서버. 클라이언트 저장소(Ascension-Team)와는 **`protocol/` 폴더의 파일만** 공유한다.
 
-- 언어/도구: C++26(`-std=c++26`), GCC, CMake + Ninja, WSL(Ubuntu) + VSCode
-- 네트워크: standalone asio 1.38 (Linux epoll / Windows IOCP), C++20 코루틴
+**Windows에서 바로 빌드하고 실행한다.** Visual Studio만 있으면 되고 WSL은 필요 없다 → [빌드와 실행](#빌드와-실행)
+
+- 언어/도구: C++23, MSVC(Visual Studio 2022 이상) + CMake. Linux + GCC 14 이상에서도 빌드된다(ThreadSanitizer 검사용, 선택)
+- 네트워크: standalone asio 1.38 + C++20 코루틴. Windows에서는 IOCP 위에서 돈다(Linux는 epoll)
 - 현재 단계: **P1 진행 중** — 서버 권한 이동(입력 전송 + 공유 이동 코드 + 클라이언트 예측·재조정), 충돌 지형, 서버 회피 판정과 지연 보정. PvE 방(최대 3명)과 PvP 방(최대 16명)을 모드별 규칙으로 나눈다.
 
 ## 폴더 구조
@@ -13,10 +15,11 @@ protocol/AscensionProtocol.h   패킷 정의 원본 (C++20 범위만 사용, 클
 protocol/AscensionMovement.h   이동 계산 원본 (서버·봇·클라이언트가 같은 코드로 이동을 계산, 클라이언트가 복사해 감)
 src/net/      Session(연결 하나), Server(accept), Packet(버퍼 도우미)
 src/game/     Room(층 인스턴스 하나), RoomManager((모드, teamCode) → Room), CollisionMap(충돌 지형), CombatRules(모드별 판정 규칙)
-src/core/     로그, 서버 시계
+src/core/     로그, 서버 시계, 운영체제별 준비(Platform.h)
 tools/bot/    헤드리스 봇 클라이언트 (동작 확인 + 이후 부하 테스트)
 tools/tests/  단위 시험 (충돌 지형)
 data/         충돌 지형 (클라이언트에서 내보낸 파일, 손으로 고치지 않음)
+Scripts/      Windows용 빌드·실행·시험 스크립트
 ```
 
 ## 스레드 구조
@@ -37,7 +40,7 @@ io_context  ←  스레드 N개가 run()
 
 - 모든 패킷은 `PacketHeader{size, id}`로 시작한다. `size`는 헤더 포함 전체 길이(최대 4096)다.
 - 고정 레이아웃(`#pragma pack(1)`, 리틀 엔디언)이고, 크기는 `static_assert`로 고정해 GCC/MSVC 배치 차이를 컴파일 시간에 잡는다.
-- 이 파일은 MSVC로 빌드되는 언리얼에서도 쓰므로 **C++20 기능까지만** 쓴다. C++26 기능은 서버 내부 코드에만 쓴다.
+- `protocol/`의 파일은 언리얼에서도 쓰므로 **C++20 기능까지만** 쓴다. C++23 기능은 서버 내부 코드에만 쓴다.
 - 패킷을 바꾸면 `kVersion`을 올리고, 클라이언트 저장소의 `Source/AscensionPrototype/AscensionProtocol.h`를 같은 내용으로 갱신한다. 버전이 다르면 로그인을 거부한다.
 
 | 패킷 | 방향 | 내용 |
@@ -62,7 +65,7 @@ io_context  ←  스레드 N개가 run()
 - **막히는 기준**: 윗면이 계단 높이(45cm)보다 높고, 캐릭터 캡슐 높이 범위(중심 ±88cm)와 겹치는 장애물. 그래서 기둥 받침(40cm)은 올라설 수 있고, 머리 위 상인방·제단 덮개 아래로는 지나갈 수 있다.
 - **이동**: 서버 이동 계산(아래 "서버 권한 이동")이 반지름 32cm 원을 장애물 밖으로 밀어내고 벽을 따라 미끄러지게 한다. 2D 이동이라 계단 오르기가 없어서, 이동에서는 낮은 받침(40cm)도 막는다.
 - **공격 엄폐**: 공격 시작점(근접은 공격자 위치, 내려찍기는 범위 중심)에서 대상까지 선분을 장애물이 가리면 맞지 않는다.
-- **실행 위치**: 저장소 루트에서 실행하면 기본 경로로 읽는다. 다른 곳에서는 `--map <경로>`, 끄려면 `--map none`. 파일을 못 읽으면 서버가 시작하지 않는다.
+- **파일 위치**: 현재 폴더의 `data/`에서 찾고, 없으면 실행 파일 위쪽 폴더로 올라가며 찾는다(스크립트로 실행하든 Visual Studio에서 F5로 실행하든 된다). 다른 파일은 `--map <경로>`, 끄려면 `--map none`. 파일을 못 읽으면 서버가 시작하지 않는다.
 - 다음 단계(서버 이동 계산·몬스터 길찾기)도 이 데이터를 쓴다.
 
 ### 회피 판정과 지연 보정 (P1)
@@ -88,100 +91,54 @@ io_context  ←  스레드 N개가 run()
 
 P0의 "클라이언트가 위치를 보내고 서버가 검증"을 **입력 전송 + 서버 이동 계산**으로 바꿨다.
 
-- **공유 이동 코드**: `protocol/AscensionMovement.h`. 60Hz 고정 틱, 달리기 450cm/s(가속·제동 2048cm/s²), 회피 0.65초 300cm(1인 데모와 같은 거리 곡선), 재사용 58틱, 지형 충돌. 서버(GCC)·봇·언리얼 클라이언트(MSVC)가 같은 코드를 컴파일해 쓰므로 같은 입력이면 같은 위치가 나온다.
-- **클라이언트**: 틱마다 입력을 만들어 자기 화면에서 바로 움직이고(예측), 입력을 번호와 함께 30Hz로 묶어 보낸다.
+- **공유 이동 코드**: `protocol/AscensionMovement.h`. 60Hz 고정 틱, 달리기 450cm/s(가속·제동 2048cm/s²), 회피 0.65초 300cm(1인 데모와 같은 거리 곡선), 재사용 58틱, 지형 충돌. 서버·봇·언리얼 클라이언트가 같은 코드를 컴파일해 쓰므로 같은 입력이면 같은 위치가 나온다(GCC 서버 + MSVC 클라이언트 조합에서도 오차 0을 확인했다).
+- **클라이언트**: 틱마다 입력을 만들어 자기 화면에서 바로 움직이고(예측), 입력을 번호와 함께 30Hz로 묶어 보낸다. 틱은 게임 시간이 아니라 **실제 시간**으로 센다(게임 시간은 히트 스톱이나 2000fps 초과에서 실제와 달라져 서버와 입력 수가 어긋난다).
 - **서버**: 입력을 받은 순서대로 한 틱씩 계산해 위치를 정한다. 같은 방 사람들에게는 `S_MoveBatch`로, 보낸 본인에게는 마지막 처리 번호와 상태를 `S_MoveAck`로 보낸다.
 - **재조정**: 클라이언트는 `S_MoveAck` 상태에서 아직 확정되지 않은 입력을 다시 돌린다. 차이는 화면에서 약 0.1초 동안 녹여 순간이동처럼 보이지 않게 한다. 같은 코드라 정상이면 차이가 0이다.
-- **속도 조작 방지**: 입력 처리권이 실제 시간 1초에 60개(최대 0.5초 분량)만 쌓인다. 더 빨리 보낸 입력은 버리고(번호는 처리한 것으로 친다) 클라이언트는 서버 상태로 재조정된다. 순간이동·벽 통과는 서버가 직접 계산하므로 원천적으로 불가능하다.
+- **속도 조작 방지**: 입력 처리권이 실제 시간 1초에 60 × 1.03개(최대 0.5초 분량)만 쌓인다. 더 빨리 보낸 입력은 버리고(번호는 처리한 것으로 친다) 클라이언트는 서버 상태로 재조정된다. 3% 여유는 긴 끊김 뒤 처리권이 다시 차오르게 하려는 것이고, 그만큼 속도 조작 상한은 달리기의 103%다. 순간이동·벽 통과는 서버가 직접 계산하므로 원천적으로 불가능하다.
 - **한계**: 공격 중 이동 잠금은 클라이언트가 이동 입력을 0으로 보내는 방식이다(서버는 공격 상태를 모른다. 이동을 줄이는 쪽이라 이득이 없다). 높이는 바닥에 선 캡슐 중심(90cm)으로 고정한다.
 
 
-## 개발 환경 준비 (처음 한 번)
-
-1. **WSL 설치**: Windows PowerShell(관리자)에서 `wsl --install -d Ubuntu`를 실행하고 재부팅한다.
-2. **도구 설치**: WSL(Ubuntu) 터미널에서
-   ```bash
-   sudo apt update
-   sudo apt install -y build-essential cmake ninja-build git
-   g++ --version
-   ```
-3. **GCC 16 설치**: `apt-cache policy g++-16`으로 설치 가능한지 확인하고, 있으면 `sudo apt install -y g++-16`로 설치한다. 없으면 배포판 버전에 맞는 방법(배포판 업그레이드나 직접 빌드)이 필요하다. P0 코드는 GCC 14 이상이면 빌드된다(GCC 14.2로 검증).
-4. **저장소 위치**: WSL 홈(`~/`)에 둔다. `/mnt/c/...`의 Windows 폴더는 WSL에서 파일 접근이 매우 느리다.
-   ```bash
-   cd ~ && git clone <서버 저장소 주소> Ascension-Server
-   ```
-5. **VSCode 연결**: Windows의 VSCode에 확장 **WSL**, **CMake Tools**, **C/C++**를 설치한다(`.vscode/extensions.json`에 추천 목록이 있다). WSL 터미널에서 `cd ~/Ascension-Server && code .`를 실행하면 WSL에 연결된 VSCode가 열린다.
-
 ## 빌드와 실행
 
-```bash
-export CXX=g++-16                 # 처음 configure 때만 필요. 다른 이름이면 그 이름으로
-cmake --preset debug              # build/debug 에 구성 (asio는 자동으로 받아 온다)
-cmake --build --preset debug
-./build/debug/ascension_server --port 7777 --threads 4
+### 준비 (처음 한 번)
+
+- **Visual Studio 2022 이상**, 워크로드 "C++를 사용한 데스크톱 개발"(CMake 포함). 언리얼 빌드에 쓰는 것과 같은 설치면 된다.
+- **Git** (CMake가 asio를 받아 올 때 쓴다).
+
+### 스크립트로 (권장)
+
+PowerShell에서 저장소 폴더로 이동한 뒤:
+
+```powershell
+.\Scripts\Build.ps1        # 빌드 → build\windowsin (처음에는 asio를 받아 온다)
+.\Scripts\RunServer.ps1    # 빌드 후 서버 실행(포트 7777). Ctrl+C로 종료
+.\Scripts\Test.ps1         # 단위 시험 + 봇 시나리오 전체. 줄마다 PASS/FAIL, 약 30초
 ```
 
-VSCode에서는 하단 상태 표시줄의 CMake Tools에서 프리셋 `debug`를 고르고 빌드해도 된다.
+스크립트 실행이 막혀 있으면 `powershell -ExecutionPolicy Bypass -File .\Scripts\RunServer.ps1`처럼 실행한다.
 
-### 봇으로 확인
-
-서버를 켠 채로 다른 WSL 터미널에서:
-
-```bash
-./build/debug/ascension_bot --bots 7 --seconds 5            # 3+3+1명 팀 배정·이동 수신
-./build/debug/ascension_bot --bots 4 --team-size 4          # 4번째는 정원 초과(RoomFull)
-./build/debug/ascension_bot --bots 3 --cheat                # 0번 봇이 입력 3배 → 서버 속도 450cm/s 근처 유지
-./build/debug/ascension_bot --bots 6 --burst                # 매 틱 회피 → 재사용 대기 유지, 예측 오차 0
-./build/debug/ascension_bot --bots 1 --wall --seconds 6      # 기둥으로 계속 걷기 → 장애물에 파고들지 않음
-./build/debug/ascension_bot --bots 3 --seconds 6 --latency 300  # 지연 300ms에서도 예측 오차 0
-./build/debug/ascension_terrain_test                        # 충돌 지형 단위 시험(서버 없이)
-```
-
-각 봇이 `PASS/FAIL`을 출력하고, 하나라도 실패하면 종료 코드 1을 돌려준다.
-
-회피 판정 시험은 서버를 `--pve-slam-ms 1500`(PvE 방에 1.5초마다 서버 내려찍기 시험 패턴)으로 켠 뒤:
-
-```bash
-./build/debug/ascension_bot --dodge-test --bots 1 --seconds 14 --latency 100           # PvE, 한쪽 지연 100ms
-./build/debug/ascension_bot --dodge-test --dodge-cheat --rtt-lie 2000 --bots 1 --seconds 16  # 시각 조작 + 왕복 부풀리기
-./build/debug/ascension_bot --mode pvp --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 50  # PvP: 0번 봇이 공격
-```
-
-- 방어 봇은 공격마다 "무적 앞부분 / 명중 직전 / 명중 뒤 / 너무 이름 / 누르지 않음" 순서로 회피를 누르고, 서버 결과를 같은 규칙으로 계산한 기대값과 비교한다. 경계 25ms 안은 시계 추정 오차 때문에 비교에서 뺀다.
-- `--latency`는 송신·수신 각각에 인공 지연을 넣는다. `--dodge-cheat`는 늦게 누르고 시각을 앞당겨 보내는 조작을 섞는다.
-- 시험 전체: 클라이언트 저장소 기록(Verification/RESULTS.md)의 2026-11-03 항목 참고.
-
-데이터 경합 검사는 `cmake --preset tsan && cmake --build --preset tsan`으로 빌드한 서버에 같은 봇을 붙인다. 최신 WSL 커널에서 TSan이 `unexpected memory mapping`으로 바로 끝나면 `setarch $(uname -m) -R ./build/tsan/ascension_server ...`처럼 주소 무작위화를 끄고 실행한다.
-
-### 2026-10-28 검증 결과 (Linux 컨테이너, GCC 14.2)
-
-| 항목 | 결과 |
+| 스크립트 | 옵션 |
 |---|---|
-| 경고 없는 빌드(`-Wall -Wextra -Wpedantic`) | PASS |
-| 봇 7개: 팀 3/3/1 배정, 같은 팀 이동 전부 수신, 보정 0 | PASS |
-| 정원 초과: 4번째 RoomFull | PASS |
-| 40m 순간이동 거부(S_Correction 1회) | PASS |
-| 회피 크기 이동 3개 동시 도착 허용 | PASS |
-| ThreadSanitizer, 스레드 4개, 봇 60개 + 위 시나리오 | 경고 0 |
-| 프로토콜 헤더 C++20 단독 컴파일(GCC·Clang `-Werror`) | PASS |
+| `Build.ps1` | `-Debug`(디버그 빌드), `-Clean`(build\windows 삭제 후 빌드) |
+| `RunServer.ps1` | `-Port 7777`, `-Threads N`, `-PveSlamMs 1500`(PvE 방에 1.5초마다 내려찍기 시험 패턴), `-NoBuild` |
+| `Test.ps1` | `-Port 17777`(시험 서버 포트), `-NoBuild`. 로그는 `build\windows	est-logs` |
 
-이후 Windows에서 언리얼 클라이언트 1개 + 봇 접속을 확인했다(클라이언트 저장소 Verification/RESULTS.md 2026-10-29). 렌더링 화면의 두 클라이언트 동시 접속은 아직 확인하지 않았다.
+### Visual Studio에서
 
-### 2026-11-03 P1 검증 결과 (WSL Ubuntu 24.04, GCC 14.2)
+"폴더 열기"로 저장소 폴더를 열면 `CMakePresets.json`의 **Windows (MSVC)** 구성이 잡힌다. 시작 항목을 `ascension_server.exe`로 고르고 F5를 누르면 디버깅된다.
 
-| 항목 | 결과 |
-|---|---|
-| 경고 없는 빌드(debug·tsan) | PASS |
-| 기존 시나리오 4개(팀 배정·정원 초과·순간이동·회피 몰림) | PASS |
-| PvE 회피 판정, 한쪽 지연 0/40/100/150/300ms | 비교 60건 불일치 0 (PvP 포함 경계 제외 5건) |
-| PvP 회피 판정, 한쪽 지연 0/50/100/150ms | 비교 51건 불일치 0 |
-| 시각 조작·왕복 부풀리기: 상한 안만 인정, 상한 밖 지각은 피격 | PASS |
-| ThreadSanitizer, 스레드 4개, 봇 60개 + 회피 시험 동시 | 경고 0 |
-| 언리얼 클라이언트(Windows) PvE·PvP 자동 회피: 회피/피격 의도와 일치 | PASS |
+### 다른 PC(팀원)에서 접속
 
-이 PC의 WSL 시계가 Windows보다 간헐적으로 수 % 빠르게 흘러, Windows 클라이언트의 서버 시계 추정에 10~40ms 오차가 남았다(허용 여유 안). 운영 서버 환경에서 다시 잰다.
+서버 PC의 관리자 PowerShell에서 방화벽을 한 번 연다.
 
-## 언리얼 클라이언트에서 접속하기
+```powershell
+New-NetFirewallRule -DisplayName "Ascension Server" -Direction Inbound -Protocol TCP -LocalPort 7777 -Action Allow
+```
+
+팀원은 서버 PC의 IPv4 주소(`ipconfig`로 확인)로 접속한다. 같은 PC에서는 `127.0.0.1:7777`이다.
+
+### 언리얼 클라이언트에서 접속
 
 클라이언트 저장소의 `Docs/온라인_P0_실행.md`를 따른다. 요약:
 
@@ -190,22 +147,54 @@ VSCode에서는 하단 상태 표시줄의 CMake Tools에서 프리셋 `debug`�
 .\Scripts\OpenOnline.ps1 -BuildRoot C:\Builds\AscensionPrototype -Name player2 -Team 1
 ```
 
-### 네트워크 (WSL2)
+### 봇으로 직접 확인
 
-- **같은 PC**: 서버가 WSL에 있어도 Windows의 `127.0.0.1:7777`로 바로 접속된다(WSL 기본 localhost 전달).
-- **다른 PC(팀원)에서 접속**: 서버 PC에서 아래를 한 번 설정한다.
-  1. `C:\Users\<사용자>\.wslconfig` 파일을 만들고 다음 두 줄을 넣는다(Windows 11 22H2 이상).
-     ```ini
-     [wsl2]
-     networkingMode=mirrored
-     ```
-  2. PowerShell에서 `wsl --shutdown`을 실행한 뒤 WSL을 다시 연다.
-  3. PowerShell(관리자)에서 Windows 방화벽과 WSL용 Hyper-V 방화벽을 연다.
-     ```powershell
-     New-NetFirewallRule -DisplayName "Ascension Server" -Direction Inbound -Protocol TCP -LocalPort 7777 -Action Allow
-     New-NetFirewallHyperVRule -Name AscensionServer -DisplayName "Ascension Server" -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -Protocol TCP -LocalPorts 7777
-     ```
-  4. 팀원은 `-Server <서버 PC의 IPv4>:7777`로 접속한다. IP는 서버 PC에서 `ipconfig`로 확인한다.
+`Test.ps1`이 아래를 모두 돌린다. 하나씩 보고 싶으면 서버를 켠 채로 다른 PowerShell 창에서:
+
+```powershell
+cd build\windowsin
+.scension_bot --bots 7 --seconds 5                 # 3+3+1명 팀 배정, 이동 예측 오차 0
+.scension_bot --bots 4 --team-size 4               # 4번째는 정원 초과(RoomFull)
+.scension_bot --bots 3 --cheat                     # 0번 봇이 입력 3배 → 서버 속도는 처리권 상한에 머문다
+.scension_bot --bots 6 --burst                     # 매 틱 회피 → 재사용 대기 유지, 예측 오차 0
+.scension_bot --bots 1 --wall --seconds 6          # 기둥으로 계속 걷기 → 장애물에 파고들지 않음
+.scension_bot --bots 3 --seconds 6 --latency 300   # 지연 300ms에서도 예측 오차 0
+.scension_terrain_test                             # 충돌 지형 단위 시험(서버 없이)
+```
+
+각 봇이 `PASS/FAIL`을 출력하고, 하나라도 실패하면 종료 코드 1을 돌려준다.
+
+회피 판정 시험은 서버를 `.\Scripts\RunServer.ps1 -PveSlamMs 1500`으로 켠 뒤:
+
+```powershell
+.scension_bot --dodge-test --bots 1 --seconds 14 --latency 100                                 # PvE, 한쪽 지연 100ms
+.scension_bot --dodge-test --dodge-cheat --rtt-lie 2000 --bots 1 --seconds 16                   # 시각 조작 + 왕복 부풀리기
+.scension_bot --mode pvp --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 50          # PvP: 0번 봇이 공격
+```
+
+- 방어 봇은 공격마다 "무적 앞부분 / 명중 직전 / 명중 뒤 / 너무 이름 / 누르지 않음" 순서로 회피를 누르고, 서버 결과를 같은 규칙으로 계산한 기대값과 비교한다. 경계 25ms 안은 시계 추정 오차 때문에 비교에서 뺀다.
+- `--latency`는 송신·수신 각각에 인공 지연을 넣는다. `--dodge-cheat`는 늦게 누르고 시각을 앞당겨 보내는 조작을 섞는다.
+- 언리얼 클라이언트와 같은 방에 봇을 넣을 때는 `--allow-others`를 붙인다(봇이 아닌 플레이어의 이동을 받아도 실패로 치지 않는다).
+
+### Linux에서 빌드 (선택: ThreadSanitizer)
+
+MSVC에는 ThreadSanitizer가 없어서, 데이터 경합 검사는 Linux(GCC 14 이상, 예: WSL)에서 한다. 평소 개발·시험에는 필요 없다.
+
+```bash
+cmake --preset linux-tsan && cmake --build --preset linux-tsan     # build/linux-tsan/bin
+setarch $(uname -m) -R ./build/linux-tsan/bin/ascension_server --port 7778   # 최신 커널: 주소 무작위화를 꺼야 TSan이 시작된다
+```
+
+## 검증 기록
+
+| 날짜 | 환경 | 결과 |
+|---|---|---|
+| 2026-10-28 | Linux 컨테이너, GCC 14.2 | P0: 팀 배정·정원 초과·순간이동 거부·회피 몰림 PASS, ThreadSanitizer 봇 60개 경고 0 |
+| 2026-11-03 | WSL, GCC 14.2 | P1 회피 판정: PvE·PvP 지연 0~300ms 비교 111건 불일치 0, 시각 조작은 상한 안만 인정, TSan 경고 0. 충돌 지형 단위 시험 21개 PASS |
+| 2026-11-05 | WSL, GCC 14.2 | P1 서버 권한 이동: 봇·언리얼 클라이언트 예측 오차 0.00cm, 속도 조작·기둥 돌파·회피 연타 PASS, TSan 경고 0 |
+| 2026-11-11 | **Windows, MSVC 19.51(VS 2026)** | Windows 전환: `/W4` 경고 0, `Test.ps1` 21개 PASS(회피 판정 비교 110건 불일치 0, 예측 오차 0.00cm). 언리얼 클라이언트 자동 회피가 계획한 75ms 전(74~76ms)에 판정, 시계 오차 1~2ms. Linux GCC 14.2 빌드도 경고 0 |
+
+세부 내용은 클라이언트 저장소 `Verification/RESULTS.md`에 날짜별로 있다. WSL에서 서버를 돌릴 때는 WSL 시계가 Windows보다 수 % 빠르게 흘러 클라이언트의 서버 시계 추정에 10~40ms 오차가 있었다. Windows에서 직접 실행하면서 사라졌다.
 
 ## 작업 규칙
 
