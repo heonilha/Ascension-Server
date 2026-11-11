@@ -6,6 +6,8 @@
 #include "game/CollisionMap.h"
 #include "game/Room.h"
 
+#include "core/Platform.h"
+
 #include <cmath>
 #include <cstdlib>
 #include <numbers>
@@ -36,7 +38,8 @@ namespace
 
 int main(int argc, char** argv)
 {
-    const std::string path = argc > 1 ? argv[1] : "data/CombatLab.txt";
+    InitPlatform();
+    const std::string path = argc > 1 ? argv[1] : FindDataFile(argv[0], "data/CombatLab.txt");
     std::string error;
     const auto loaded = CollisionMap::Load(path, error);
     if (!loaded)

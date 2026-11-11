@@ -5,8 +5,16 @@
 
 namespace asc::net
 {
+    // Linux: 재시작 직후에도 같은 포트를 바로 쓴다.
+    // Windows: SO_REUSEADDR는 이미 떠 있는 서버와 같은 포트를 또 열게 허용하므로 끈다(두 번째 서버는 오류로 끝난다).
+#ifdef _WIN32
+    static constexpr bool kReuseAddress = false;
+#else
+    static constexpr bool kReuseAddress = true;
+#endif
+
     Server::Server(asio::io_context& io, std::uint16_t port, game::RoomManager& rooms)
-        : io_(io), acceptor_(io, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port), /*reuse_address*/ true), rooms_(rooms)
+        : io_(io), acceptor_(io, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port), kReuseAddress), rooms_(rooms)
     {
     }
 
