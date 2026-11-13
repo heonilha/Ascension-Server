@@ -1,4 +1,5 @@
-// ascension_server [--port 7777] [--threads N] [--pve-slam-ms 0] [--map data/CombatLab.txt]
+// ascension_server [--port 7777] [--threads N] [--pve-monsters 1] [--pve-slam-ms 0] [--map data/CombatLab.txt]
+//   --pve-monsters: PvE 방에 서버 몬스터를 둔다(기본 켬). 0이면 빈 방
 //   --pve-slam-ms: PvE 방에서 이 주기로 서버 내려찍기 시험 패턴을 낸다(회피 판정 시험용, 기본 끔)
 //   --map: 충돌 지형 파일. 기본값은 현재 폴더나 실행 파일 위쪽 폴더에서 찾는다. none이면 지형 검사를 끈다
 #include "AscensionProtocol.h"
@@ -44,6 +45,7 @@ int main(int argc, char** argv)
         if (key == "--port") port = ParseNumber<std::uint16_t>(value, port);
         else if (key == "--threads") threads = std::max(1u, ParseNumber<unsigned>(value, threads));
         else if (key == "--pve-slam-ms") roomOptions.pveSlamIntervalMs = ParseNumber<std::uint32_t>(value, 0);
+        else if (key == "--pve-monsters") roomOptions.pveMonsters = ParseNumber<int>(value, 1) != 0;
         else if (key == "--map") mapPath = value;
     }
 

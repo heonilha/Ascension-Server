@@ -48,7 +48,51 @@ namespace asc::game
                 }
             }
         }
+        for (const move::Obstacle& o : map.world_.obstacles)
+        {
+            Bounds b{1e30f, 1e30f, -1e30f, -1e30f};
+            for (const Vec2 v : o.polygon)
+            {
+                b.minX = std::min(b.minX, v.x), b.minY = std::min(b.minY, v.y);
+                b.maxX = std::max(b.maxX, v.x), b.maxY = std::max(b.maxY, v.y);
+            }
+            map.bounds_.push_back(b);
+        }
         return map;
+    }
+
+    bool CollisionMap::SolidOverlap(Vec2 p, float radius) const
+    {
+        for (std::size_t i = 0; i < world_.obstacles.size(); ++i)
+        {
+            const Bounds& b = bounds_[i];
+            if (p.x < b.minX - radius || p.x > b.maxX + radius || p.y < b.minY - radius || p.y > b.maxY + radius) continue;
+            if (move::Solid(world_.obstacles[i]) && move::SignedDistance(p, world_.obstacles[i].polygon) < radius) return true;
+        }
+        return false;
+    }
+
+    bool CollisionMap::PushOutSolid(Vec2& p, float radius) const
+    {
+        bool moved = false;
+        for (int iteration = 0; iteration < 4; ++iteration)
+        {
+            bool pushed = false;
+            for (std::size_t i = 0; i < world_.obstacles.size(); ++i)
+            {
+                const Bounds& b = bounds_[i];
+                if (p.x < b.minX - radius || p.x > b.maxX + radius || p.y < b.minY - radius || p.y > b.maxY + radius) continue;
+                if (!move::Solid(world_.obstacles[i])) continue;
+                Vec2 normal{};
+                const float d = move::SignedDistance(p, world_.obstacles[i].polygon, &normal);
+                if (d >= radius) continue;
+                p.x += normal.x * (radius - d);
+                p.y += normal.y * (radius - d);
+                pushed = moved = true;
+            }
+            if (!pushed) break;
+        }
+        return moved;
     }
 
     bool CollisionMap::Relevant(const move::Obstacle& obstacle, float centerZ) const

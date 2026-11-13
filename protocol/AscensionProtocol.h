@@ -15,11 +15,12 @@
 
 namespace asc::proto
 {
-    inline constexpr std::uint16_t kVersion = 3;
+    inline constexpr std::uint16_t kVersion = 4;
     inline constexpr std::uint16_t kMaxPacketSize = 4096;
     inline constexpr std::size_t kNameLength = 32;     // UTF-8, 널 문자 포함
     inline constexpr std::uint8_t kMaxRoomPlayers = 3; // PvE 층 인스턴스 최대 인원(팀원 수)
     inline constexpr std::uint8_t kMaxPvpPlayers = 16; // PvP 스테이지 최대 인원
+    inline constexpr std::uint8_t kMaxMonsters = 48;   // PvE 층 하나의 최대 몬스터 수
     inline constexpr std::uint16_t kDefaultPort = 7777;
     inline constexpr std::uint32_t kServerTickMs = 50; // 서버 틱 20Hz. S_MoveBatch.serverTick × 이 값 = 서버 시간
 
@@ -41,6 +42,13 @@ namespace asc::proto
         S_HitResult = 15,
         C_Input = 16,
         S_MoveAck = 17,
+        S_AttackCancel = 18,
+        S_MonsterBatch = 19,
+        S_MonsterHit = 20,
+        S_WaveSpawn = 21,
+        S_WaveEnd = 22,
+        C_Respawn = 23,
+        S_Respawn = 24,
     };
 
     // 방 종류. 같은 teamCode라도 모드가 다르면 다른 방이다.
@@ -54,6 +62,10 @@ namespace asc::proto
     {
         Slam = 1,  // 서버가 내는 범위 공격(PvE 내려찍기 시험 패턴, 이후 수문장 패턴)
         Slash = 2, // 플레이어 근접 공격(PvP)
+        MonsterArc = 3,    // 몬스터 부채꼴 베기(center에서 yaw 방향, 반지름 radius, 반각 halfAngle)
+        MonsterCharge = 4, // 폭주 망령 돌진(center에서 yaw 방향 직선, hitServerMs에 출발)
+        Wave = 5,          // 플레이어 일반 검기(C_Attack, PvE)
+        HeavyWave = 6,     // 플레이어 충전 검기(C_Attack, PvE). charge 0~1
     };
 
     enum class HitResult : std::uint8_t
@@ -260,6 +272,7 @@ namespace asc::proto
         std::uint32_t pressServerMs;
         float yaw;
         AttackKind kind;
+        float charge; // HeavyWave의 충전량 0~1. 서버가 직전 공격 뒤 지난 시간으로 상한을 건다
     };
 
     // 서버가 공격을 시작했다. 클라이언트는 hitServerMs에 맞춰 예고를 재생한다(보간 지연 없이).
@@ -274,6 +287,95 @@ namespace asc::proto
         Vec3 center;
         float radius;
         float damage;
+        std::uint16_t monsterId; // 0 = 몬스터 공격이 아님
+        float yaw;               // MonsterArc·MonsterCharge의 방향(도)
+        float halfAngle;         // MonsterArc의 반각(도). 0이면 원
+    };
+
+    // 예고한 공격이 취소됐다(몬스터가 맞아서 경직됨). 클라이언트는 예고 표시를 지운다.
+    struct S_AttackCancel
+    {
+        PacketHeader header;
+        std::uint32_t attackId;
+    };
+
+    // ---- 몬스터 (P1: 서버 권한, PvE 방) ----
+    enum class MonsterState : std::uint8_t
+    {
+        Idle = 0,    // 노릴 플레이어가 없다
+        Chase = 1,   // 추적
+        Tell = 2,    // 공격 예고(제자리)
+        Dash = 3,    // 폭주 망령 돌진
+        Recover = 4, // 공격 뒤 빈틈
+        Stagger = 5, // 피격 경직(넉백 중)
+    };
+
+    // 위치는 cm 정수, 방향은 360도를 256단계로 줄여 보낸다(몬스터 48마리 × 20Hz).
+    struct MonsterEntry
+    {
+        std::uint16_t id;
+        std::uint8_t kind; // 0 망령 검병, 1 폭주 망령, 2 망령 지휘관
+        MonsterState state;
+        std::int16_t x, y;
+        std::uint8_t yaw; // 도 = yaw × 360 / 256
+        std::uint16_t hp;
+    };
+
+    // 뒤에 MonsterEntry[count]가 붙는다. 살아 있는 몬스터 전부를 서버 틱마다 보낸다(목록에 없으면 사라진 것).
+    struct S_MonsterBatch
+    {
+        PacketHeader header;
+        std::uint32_t serverTick;
+        std::uint8_t count;
+    };
+
+    // 몬스터가 피해를 입었다. hpAfter가 0이면 죽었다. 방 전체에 보낸다.
+    struct S_MonsterHit
+    {
+        PacketHeader header;
+        std::uint16_t monsterId;
+        std::uint32_t attackerId;
+        float damage;
+        std::uint16_t hpAfter;
+        float x, y; // 맞은 순간의 몬스터 위치
+    };
+
+    // 플레이어 검기가 나갔다(서버가 판정하는 투사체). 방 전체에 보낸다.
+    struct S_WaveSpawn
+    {
+        PacketHeader header;
+        std::uint32_t waveId;
+        std::uint32_t ownerId;
+        float x, y;
+        float yaw;
+        float radius;
+        float speed;
+        std::uint16_t lifeMs;
+        float charge;
+    };
+
+    // 검기가 수명 전에 끝났다(관통 수 소진 또는 벽).
+    struct S_WaveEnd
+    {
+        PacketHeader header;
+        std::uint32_t waveId;
+        float x, y;
+    };
+
+    // ---- 사망·부활 ----
+    // 서버 HP가 0이 되면 그 플레이어는 죽은 상태다(몬스터가 노리지 않고 공격·이동 입력을 무시한다).
+    struct C_Respawn
+    {
+        PacketHeader header;
+    };
+
+    // 부활: 시작 위치로 옮기고 HP를 채운다. 방 전체에 보낸다.
+    struct S_Respawn
+    {
+        PacketHeader header;
+        std::uint32_t playerId;
+        Vec3 position;
+        float hp;
     };
 
     // 공격 범위 안에 있던 플레이어 한 명의 판정 결과. 방 전체에 보낸다.
@@ -311,8 +413,16 @@ namespace asc::proto
     static_assert(sizeof(C_Ping) == 12);
     static_assert(sizeof(S_Pong) == 12);
     static_assert(sizeof(C_Dodge) == 16);
-    static_assert(sizeof(C_Attack) == 17);
-    static_assert(sizeof(S_AttackStart) == 41);
+    static_assert(sizeof(C_Attack) == 21);
+    static_assert(sizeof(S_AttackStart) == 51);
+    static_assert(sizeof(S_AttackCancel) == 8);
+    static_assert(sizeof(MonsterEntry) == 11);
+    static_assert(sizeof(S_MonsterBatch) == 9);
+    static_assert(sizeof(S_MonsterHit) == 24);
+    static_assert(sizeof(S_WaveSpawn) == 38);
+    static_assert(sizeof(S_WaveEnd) == 16);
+    static_assert(sizeof(C_Respawn) == 4);
+    static_assert(sizeof(S_Respawn) == 24);
     static_assert(sizeof(S_HitResult) == 31);
 
     // 패킷 타입 → PacketId
@@ -325,6 +435,13 @@ namespace asc::proto
     template <> struct IdOf<S_PlayerLeft> { static constexpr PacketId value = PacketId::S_PlayerLeft; };
     template <> struct IdOf<C_Input> { static constexpr PacketId value = PacketId::C_Input; };
     template <> struct IdOf<S_MoveAck> { static constexpr PacketId value = PacketId::S_MoveAck; };
+    template <> struct IdOf<S_AttackCancel> { static constexpr PacketId value = PacketId::S_AttackCancel; };
+    template <> struct IdOf<S_MonsterBatch> { static constexpr PacketId value = PacketId::S_MonsterBatch; };
+    template <> struct IdOf<S_MonsterHit> { static constexpr PacketId value = PacketId::S_MonsterHit; };
+    template <> struct IdOf<S_WaveSpawn> { static constexpr PacketId value = PacketId::S_WaveSpawn; };
+    template <> struct IdOf<S_WaveEnd> { static constexpr PacketId value = PacketId::S_WaveEnd; };
+    template <> struct IdOf<C_Respawn> { static constexpr PacketId value = PacketId::C_Respawn; };
+    template <> struct IdOf<S_Respawn> { static constexpr PacketId value = PacketId::S_Respawn; };
     template <> struct IdOf<S_MoveBatch> { static constexpr PacketId value = PacketId::S_MoveBatch; };
     template <> struct IdOf<C_Ping> { static constexpr PacketId value = PacketId::C_Ping; };
     template <> struct IdOf<S_Pong> { static constexpr PacketId value = PacketId::S_Pong; };

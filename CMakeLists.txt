@@ -41,7 +41,8 @@ add_library(ascension_core STATIC
     src/net/Server.cpp
     src/game/Room.cpp
     src/game/RoomManager.cpp
-    src/game/CollisionMap.cpp)
+    src/game/CollisionMap.cpp
+    src/game/Monsters.cpp)
 target_include_directories(ascension_core PUBLIC src)
 target_link_libraries(ascension_core PUBLIC asio ascension_protocol)
 if(MSVC)
@@ -61,3 +62,7 @@ target_link_libraries(ascension_bot PRIVATE ascension_core)
 # ---- 시험: 충돌 지형 단위 시험 ----
 add_executable(ascension_terrain_test tools/tests/terrain_test.cpp)
 target_link_libraries(ascension_terrain_test PRIVATE ascension_core)
+
+# ---- 시험: 몬스터·검기 시뮬레이션 단위 시험 ----
+add_executable(ascension_monster_test tools/tests/monster_test.cpp)
+target_link_libraries(ascension_monster_test PRIVATE ascension_core)

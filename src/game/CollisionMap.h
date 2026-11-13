@@ -28,6 +28,11 @@ namespace asc::game
         // 두 점 사이 시야가 막혔는가(공격이 기둥 너머로 닿지 않게). 두 점 중 높은 쪽 높이 범위로 본다.
         bool LineBlocked(const proto::Vec3& from, const proto::Vec3& to) const;
 
+        // 이동에서 단단한 장애물(move::Solid: 낮은 받침 포함)과 반지름 radius 원이 겹치는가. 몬스터 이동·생성 위치 검사용.
+        bool SolidOverlap(move::Vec2 point, float radius) const;
+        // 원을 단단한 장애물 밖으로 밀어낸다. 밀렸으면 true.
+        bool PushOutSolid(move::Vec2& point, float radius) const;
+
         const move::World& World() const { return world_; }
         const std::vector<move::Obstacle>& Obstacles() const { return world_.obstacles; }
 
@@ -35,6 +40,12 @@ namespace asc::game
         bool Relevant(const move::Obstacle& obstacle, float centerZ) const;
         static bool SegmentHitsPolygon(move::Vec2 a, move::Vec2 b, const std::vector<move::Vec2>& polygon);
 
+        struct Bounds
+        {
+            float minX, minY, maxX, maxY;
+        };
+
         move::World world_;
+        std::vector<Bounds> bounds_; // 장애물별 경계 상자(먼 장애물을 빨리 건너뛴다)
     };
 }
