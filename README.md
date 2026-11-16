@@ -35,8 +35,11 @@ rust/         Rust 서버 워크스페이스 (전환 진행 중, 아래 "Rust �
 |---|---|
 | `asc-protocol` | 패킷 구조체(`#[repr(C, packed)]`), 열거형, `make`/`read`/이름 복사 |
 | `asc-movement` | `World`(충돌 파일 읽기, 장애물 목록, 거리 계산), `step`(1틱 진행). 계산은 `native/movement_shim.cpp`를 거쳐 C++ 헤더가 한다 |
+| `asc-game` | 네트워크를 모르는 게임 계산. `collision`(충돌 지형), `combat_rules`(모드별 규칙·지연 보정), `monsters`(몬스터 AI·증원·검기), `room_layout`(시작 위치·맵 범위). C++ `src/game`의 CollisionMap·CombatRules·Monsters를 옮긴 것 |
 
-**결과가 같은지 확인하는 방법**: `ascension_movement_golden`(CMake로 C++ 서버·봇과 같은 설정으로 빌드)이 무작위 걷기 8번 × 3600틱과 지형 거리 격자를 계산해 기록을 만든다. 저장해 둔 기록(`rust/crates/movement/tests/golden/movement_v4.txt`)과 Rust 시험(`tests/golden.rs`)이 FFI로 계산한 결과를 비트 단위로 비교한다. `Test.ps1`이 두 가지를 모두 돌린다. 이동 헤더를 일부러 고쳤다면 `.\Scripts\Test.ps1 -UpdateGolden`으로 기록을 다시 만든다.
+`asc-game`은 Rust로 다시 쓴 코드라서 C++ 원본과 결과가 같은지도 기준 기록으로 확인한다. `ascension_game_golden`이 충돌 격자(6,000여 점)·경로와 시야 4,000쌍·몬스터 시뮬레이션 60초(증원을 끄고 자리를 정해 둔 시나리오)를 계산하고, Rust 시험이 같은 입력으로 비트 단위까지 같은 결과를 내는지 본다(`rust/crates/game/tests/golden.rs`). 증원 자리만은 비교하지 않는다: C++은 `std::mt19937`과 표준 분포를 쓰는데 분포 구현이 컴파일러마다 달라, Rust는 자체 난수(`rng.rs`)를 쓰고 규칙(거리·간격·장애물·상한)을 시험한다.
+
+**이동 결과가 같은지 확인하는 방법**: `ascension_movement_golden`(CMake로 C++ 서버·봇과 같은 설정으로 빌드)이 무작위 걷기 8번 × 3600틱과 지형 거리 격자를 계산해 기록을 만든다. 저장해 둔 기록(`rust/crates/movement/tests/golden/movement_v4.txt`)과 Rust 시험(`tests/golden.rs`)이 FFI로 계산한 결과를 비트 단위로 비교한다. `Test.ps1`이 두 가지를 모두 돌린다. 이동 헤더를 일부러 고쳤다면 `.\Scripts\Test.ps1 -UpdateGolden`으로 기록을 다시 만든다.
 
 ```powershell
 cd rust
@@ -46,7 +49,7 @@ cargo test --workspace     # 처음에는 bytemuck·cc를 받아 온다. C++ 연
 전환 순서(완료 기준: 기존 C++ 봇과 `Test.ps1` 시나리오가 Rust 서버에서 전부 PASS):
 
 1. ~~프로토콜 크레이트, 이동 FFI, 기준 기록 비교~~ (완료)
-2. 충돌 지형(`CollisionMap`)·전투 규칙(`CombatRules`)·몬스터(`Monsters`)와 단위 시험
+2. ~~충돌 지형(`CollisionMap`)·전투 규칙(`CombatRules`)·몬스터(`Monsters`)와 단위 시험~~ (완료)
 3. 네트워크·방(`Session`, `Room`, `RoomManager`): tokio, 방 하나 = 태스크 하나
 4. `Test.ps1`을 Rust 서버로 돌려 전부 PASS → C++ 서버 소스 제거
 
@@ -255,6 +258,7 @@ setarch $(uname -m) -R ./build/linux-tsan/bin/ascension_server --port 7778   # �
 | 2026-11-11 | **Windows, MSVC 19.51(VS 2026)** | Windows 전환: `/W4` 경고 0, `Test.ps1` 21개 PASS(회피 판정 비교 110건 불일치 0, 예측 오차 0.00cm). 언리얼 클라이언트 자동 회피가 계획한 75ms 전(74~76ms)에 판정, 시계 오차 1~2ms. Linux GCC 14.2 빌드도 경고 0 |
 | 2026-11-14 | Windows, MSVC 19.51 | P1 몬스터: 단위 시험 30개 + `Test.ps1` 27개 PASS(사냥 봇 명중 42·처치 30·넉백 12, 48마리 상한, 충전 조작 차단). 틱 평균 0.25ms(48마리). 언리얼 클라이언트 자동 사냥 검기 27/27 인정, 예측 오차 0. Linux TSan 경고 0 |
 | 2026-11-14 | Windows, MSVC 19.51 + Rust 1.99.1 | Rust 전환 토대: `Test.ps1` 29개 PASS(기존 27 + 이동 기준 기록 + Rust 시험 11개). FFI 이동 결과가 C++ 빌드 기록 106줄과 비트 단위로 같음(8회 × 3600틱, 벽 접촉 990틱, 회피 156번, 지형 거리 격자). Rust 최적화 0·2·release 모두 같음. clippy 경고 0. Linux 빌드는 아직 확인하지 않음 |
+| 2026-11-16 | Windows, MSVC 19.51 + Rust 1.99.1 | Rust 전환 2단계(충돌 지형·전투 규칙·몬스터): `Test.ps1` 30개 PASS(기존 27 + 기준 기록 2 + Rust 시험 39개). Rust 이식본이 C++ 기록 28줄과 비트 단위로 같음: 충돌 격자(막힘 566·단단함 757), 경로·시야 4,000쌍(경로 막힘 1,047·시야 막힘 884), 몬스터 1,200틱(생성 42·처치 36·예고 270·돌진 접촉 42·피격 106). C++ 단위 시험 지형 21개·몬스터 30개를 옮겨 모두 PASS, 증원은 48마리 상한에 24.75초 도달. 최적화 0·2·release 모두 같음, clippy 경고 0. Linux 빌드는 아직 확인하지 않음 |
 
 세부 내용은 클라이언트 저장소 `Verification/RESULTS.md`에 날짜별로 있다. WSL에서 서버를 돌릴 때는 WSL 시계가 Windows보다 수 % 빠르게 흘러 클라이언트의 서버 시계 추정에 10~40ms 오차가 있었다. Windows에서 직접 실행하면서 사라졌다.
 
