@@ -524,6 +524,45 @@ pub fn read<T: Pod>(bytes: &[u8]) -> Option<(T, &[u8])> {
     Some((bytemuck::pod_read_unaligned(head), tail))
 }
 
+/// 받은 바이트 전체를 고정 길이 패킷 `T`로 읽는다. 크기가 정확히 같지 않으면 `None`.
+pub fn read_exact<T: Packet>(bytes: &[u8]) -> Option<T> {
+    (bytes.len() == core::mem::size_of::<T>()).then(|| bytemuck::pod_read_unaligned(bytes))
+}
+
+/// 고정 부분 뒤에 항목 배열이 붙는 패킷(`count` 필드가 있다).
+pub trait Counted: Packet {
+    fn set_count(&mut self, count: u8);
+}
+
+macro_rules! counted {
+    ($($name:ident),*) => {
+        $(impl Counted for $name {
+            fn set_count(&mut self, count: u8) {
+                self.count = count;
+            }
+        })*
+    };
+}
+counted!(SEnterRoom, CInput, SMoveBatch, SMonsterBatch);
+
+/// 고정 길이 패킷 하나를 보낼 바이트로 만든다.
+pub fn encode<T: Packet>(packet: &T) -> Vec<u8> {
+    bytemuck::bytes_of(packet).to_vec()
+}
+
+/// 고정 부분 + 항목 배열로 이뤄진 가변 길이 패킷을 보낼 바이트로 만든다. `count`와 `header.size`는 여기서 채운다.
+pub fn encode_with_entries<T: Counted, E: Pod>(mut packet: T, entries: &[E]) -> Vec<u8> {
+    let entry_bytes: &[u8] = bytemuck::cast_slice(entries);
+    let total = core::mem::size_of::<T>() + entry_bytes.len();
+    assert!(total <= MAX_PACKET_SIZE as usize && entries.len() <= u8::MAX as usize, "패킷이 너무 크다: {total}바이트, 항목 {}개", entries.len());
+    packet.set_count(entries.len() as u8);
+    let mut bytes = Vec::with_capacity(total);
+    bytes.extend_from_slice(bytemuck::bytes_of(&packet));
+    bytes.extend_from_slice(entry_bytes);
+    bytes[..2].copy_from_slice(&(total as u16).to_le_bytes());
+    bytes
+}
+
 /// 이름을 고정 길이 배열에 복사한다. 넘치면 글자 경계에서 자르고 항상 널 문자로 끝낸다.
 pub fn copy_name(destination: &mut [u8; NAME_LENGTH], source: &str) {
     *destination = [0; NAME_LENGTH];
@@ -591,6 +630,31 @@ mod tests {
         assert_eq!(first, entry);
         assert_eq!(second, entry);
         assert!(read::<MoveEntry>(tail).is_none());
+    }
+
+    #[test]
+    fn encode_with_entries_fills_count_and_size() {
+        let entries = [MonsterEntry { id: 1, kind: 0, state: 1, x: -5, y: 7, yaw: 64, hp: 50 }; 3];
+        let mut batch = make::<SMonsterBatch>();
+        batch.server_tick = 9;
+        let bytes = encode_with_entries(batch, &entries);
+        assert_eq!(bytes.len(), 9 + 3 * 11);
+        let (head, tail) = read::<SMonsterBatch>(&bytes).unwrap();
+        assert_eq!(({ head.header.size }, head.count, { head.server_tick }), (42, 3, 9));
+        assert_eq!(read::<MonsterEntry>(tail).unwrap().0, entries[0]);
+
+        // 항목이 없어도 고정 부분은 그대로 나간다(입장 거부 응답)
+        let empty = encode_with_entries(make::<SEnterRoom>(), &[] as &[PlayerInfo]);
+        assert_eq!(empty.len(), 42);
+        assert_eq!(&empty[..2], &[42, 0]);
+    }
+
+    #[test]
+    fn read_exact_requires_exact_size() {
+        let bytes = encode(&make::<CPing>());
+        assert!(read_exact::<CPing>(&bytes).is_some());
+        assert!(read_exact::<CPing>(&bytes[..11]).is_none());
+        assert!(read_exact::<CRespawn>(&bytes).is_none());
     }
 
     #[test]

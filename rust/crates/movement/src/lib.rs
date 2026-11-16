@@ -68,6 +68,7 @@ mod ffi {
 
     extern "C" {
         pub fn asc_world_parse(text: *const u8, length: usize, error: *mut u8, error_capacity: usize) -> *mut AscWorld;
+        pub fn asc_world_empty() -> *mut AscWorld;
         pub fn asc_world_free(world: *mut AscWorld);
         pub fn asc_world_obstacle_count(world: *const AscWorld) -> usize;
         pub fn asc_world_obstacle(world: *const AscWorld, index: usize, out: *mut ObstacleView) -> i32;
@@ -121,6 +122,13 @@ impl World {
                 Err(String::from_utf8_lossy(&error[..length]).into_owned())
             }
         }
+    }
+
+    /// 장애물이 없는 지형. 지형 검사를 끈 실행(`--map none`)에서 이동 계산에 넘긴다.
+    pub fn empty() -> World {
+        // SAFETY: 인자가 없고, 돌려준 포인터는 Drop에서 한 번 해제한다.
+        let raw = unsafe { ffi::asc_world_empty() };
+        World { raw: NonNull::new(raw).expect("out of memory") }
     }
 
     pub fn obstacle_count(&self) -> usize {
@@ -232,6 +240,18 @@ mod tests {
         assert_eq!(normal, Vec2 { x: -1.0, y: 0.0 });
         let (inside, _) = world.signed_distance(0, Vec2 { x: 120.0, y: 0.0 });
         assert_eq!(inside, -20.0);
+    }
+
+    #[test]
+    fn empty_world_has_no_obstacles_and_allows_free_movement() {
+        let world = World::empty();
+        assert_eq!(world.obstacle_count(), 0);
+        let mut state = MoveSimState { x: 0.0, y: 0.0, vx: 0.0, vy: 0.0, dodge_tick: 0, cooldown: 0, dodge_x: 0.0, dodge_y: 0.0 };
+        let input = InputCommand { move_x: 1.0, move_y: 0.0, flags: 0, dodge_x: 0.0, dodge_y: 0.0 };
+        for _ in 0..120 {
+            step(&mut state, &input, &world);
+        }
+        assert!({ state.x } > 800.0, "x = {}", { state.x });
     }
 
     #[test]

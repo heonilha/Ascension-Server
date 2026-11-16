@@ -72,6 +72,19 @@ extern "C"
         }
     }
 
+    // 장애물이 없는 지형(지형 검사를 끈 실행용). 실패하면 nullptr.
+    AscWorld* asc_world_empty() noexcept
+    {
+        try
+        {
+            return new AscWorld{};
+        }
+        catch (...)
+        {
+            return nullptr;
+        }
+    }
+
     void asc_world_free(AscWorld* world) noexcept
     {
         delete world;
