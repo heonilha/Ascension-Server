@@ -5,21 +5,23 @@
 # Server B (-Port + 1): PvE rooms have server monsters (spawning, chasing, attacking).
 #   .\Scripts\Test.ps1               # builds first, prints one PASS/FAIL line per scenario (about 50 s)
 #   .\Scripts\Test.ps1 -NoBuild
+#   .\Scripts\Test.ps1 -Rust         # same bot scenarios against the Rust server (rust\target\release\ascension-server.exe)
 #   .\Scripts\Test.ps1 -UpdateGolden # after changing movement or game rules on purpose: rewrite the committed records
 # Logs: build\windows\test-logs\<scenario>.log and server.log. Exit code 1 if anything failed.
 # Scenarios run in parallel, each in its own rooms (distinct --team-base).
 param(
     [int]$Port = 17777,
     [switch]$NoBuild,
-    [switch]$UpdateGolden
+    [switch]$UpdateGolden,
+    [switch]$Rust
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $NoBuild) { & (Join-Path $PSScriptRoot 'Build.ps1') }
 $bin = Join-Path $root 'build\windows\bin'
 $logs = Join-Path $root 'build\windows\test-logs'
-if (Test-Path $logs) { Remove-Item -Recurse -Force $logs }
 New-Item -ItemType Directory -Force $logs | Out-Null
+Get-ChildItem $logs | Remove-Item -Recurse -Force # empty it, but keep the folder (a terminal may be sitting in it)
 
 $scenarios = [ordered]@{
     # movement (server authoritative, prediction must match)
@@ -54,6 +56,21 @@ $monsterScenarios = [ordered]@{
     'mon_cap_48'      = '--monsters --expect-cap --bots 2 --team-size 2 --seconds 40 --team-base 2300'
     'mon_hunt_lat150' = '--hunt --bots 1 --seconds 20 --latency 150 --team-base 2400'
 }
+
+# The bot (C++) is the same either way; -Rust only swaps the server it talks to.
+$serverExe = Join-Path $bin 'ascension_server.exe'
+if ($Rust) {
+    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw 'cargo not found: install Rust from https://rustup.rs' }
+    $serverExe = Join-Path $root 'rust\target\release\ascension-server.exe'
+    if (-not $NoBuild) {
+        $manifest = Join-Path $root 'rust\Cargo.toml'
+        $buildLog = Join-Path $logs 'rust_build.log'
+        cmd /c "cargo build --release -p asc-server --manifest-path `"$manifest`" > `"$buildLog`" 2>&1"
+        if ($LASTEXITCODE -ne 0) { throw "Rust server build failed. See $buildLog" }
+    }
+    if (-not (Test-Path $serverExe)) { throw "Rust server not built: $serverExe" }
+}
+Write-Host "Server under test: $serverExe"
 
 [Console]::OutputEncoding = [Text.Encoding]::UTF8 # unit test output is UTF-8
 $failed = 0
@@ -96,10 +113,10 @@ try {
     }
     else { Write-Host ('{0,-18} {1}' -f 'rust_tests', 'SKIP (cargo not found: install Rust from https://rustup.rs)') }
 
-    $server = Start-Process -FilePath (Join-Path $bin 'ascension_server.exe') -ArgumentList "--port $Port --threads 4 --pve-monsters 0 --pve-slam-ms 1500" `
+    $server = Start-Process -FilePath $serverExe -ArgumentList "--port $Port --threads 4 --pve-monsters 0 --pve-slam-ms 1500" `
         -RedirectStandardOutput (Join-Path $logs 'server.log') -RedirectStandardError (Join-Path $logs 'server.err.log') -PassThru -NoNewWindow
     $monsterPort = $Port + 1
-    $monsterServer = Start-Process -FilePath (Join-Path $bin 'ascension_server.exe') -ArgumentList "--port $monsterPort --threads 4" `
+    $monsterServer = Start-Process -FilePath $serverExe -ArgumentList "--port $monsterPort --threads 4" `
         -RedirectStandardOutput (Join-Path $logs 'server_monsters.log') -RedirectStandardError (Join-Path $logs 'server_monsters.err.log') -PassThru -NoNewWindow
     Start-Sleep -Milliseconds 700
     if ($server.HasExited -or $monsterServer.HasExited) { throw "Test server did not start (port $Port or $monsterPort busy?). See $logs" }
