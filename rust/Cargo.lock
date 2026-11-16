@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "asc-game"
+version = "0.1.0"
+dependencies = [
+ "asc-movement",
+ "asc-protocol",
+]
+
+[[package]]
 name = "asc-movement"
 version = "0.1.0"
 dependencies = [

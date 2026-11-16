@@ -1,0 +1,9 @@
+[package]
+name = "asc-game"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+asc-protocol.workspace = true
+asc-movement.workspace = true
