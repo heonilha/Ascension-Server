@@ -3,6 +3,7 @@
 // ascension_bot [--host 127.0.0.1] [--port 7777] [--bots 6] [--team-size 3] [--seconds 5]
 //               [--team-base 1000] [--mode pve|pvp] [--cheat] [--burst] [--wall] [--map data/CombatLab.txt]
 //               [--latency 0] [--dodge-test] [--dodge-cheat] [--rtt-lie 0] [--allow-others]
+//               [--monsters] [--expect-cap] [--hunt] [--wave-cheat]
 //
 // 봇 i는 teamCode = team-base + i / team-size 방에 들어가 시작 위치 주변을 원을 그리며 돈다.
 // 끝나면 봇마다 받은 패킷을 확인하고, 문제가 있으면 종료 코드 1을 돌려준다.
@@ -22,6 +23,12 @@
 //   --latency: 송신·수신에 각각 이만큼 인공 지연을 넣는다(한쪽 방향 ms).
 //   --dodge-cheat: 늦게 누르고 누른 시각을 앞당겨 보내는 조작을 섞는다. 상한 밖이면 피격이어야 한다.
 //   --rtt-lie: 서버에 알려 주는 왕복 시간을 이 값으로 속인다(되감기 상한 시험).
+//
+// 몬스터 시험(몬스터가 켜진 서버의 PvE 방)
+//   --monsters: 몬스터가 생기고(10마리 이상, 48마리 이하), 장애물에 파고들지 않고, 공격을 예고하는지 확인한다.
+//   --expect-cap: 아무도 잡지 않을 때 정확히 48마리까지 차는지 확인한다(35초 이상 돌릴 것).
+//   --hunt: 제자리에서 가장 가까운 몬스터에게 검기를 쏜다. 명중·처치·넉백·경직을 확인한다. 죽으면 부활한다.
+//   --wave-cheat: 충전하지 않고 완충 검기만 연달아 보낸다. 서버가 처음 한 번 말고는 거부해야 한다.
 #include "AscensionProtocol.h"
 #include "AscensionMovement.h"
 #include "game/CollisionMap.h"
@@ -47,6 +54,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 using namespace asc;
@@ -69,6 +77,10 @@ namespace
         bool cheat = false;
         bool wall = false; // 0번 봇이 기둥을 뚫고 지나가려 한다
         bool allowOthers = false; // 같은 방에 봇이 아닌 플레이어(언리얼 클라이언트)가 있어도 된다
+        bool monsters = false;    // 몬스터 기본 확인
+        bool expectCap = false;   // 48마리 상한 확인
+        bool hunt = false;        // 검기로 사냥
+        bool waveCheat = false;   // 충전 없이 완충 검기 연사
         bool burst = false; // 매 틱 회피를 누른다(재사용 대기 시험)
         const move::World* world = nullptr; // 이동 예측용 지형(서버와 같은 파일)
         int latencyMs = 0;
@@ -90,6 +102,18 @@ namespace
         float firstAckTime = -1.f, lastAckTime = 0.f;
         move::Vec2 firstAck{}, lastAck{};
         int serverDodges = 0;               // 서버 상태에서 회피가 시작된 횟수
+        // 몬스터
+        std::set<std::uint16_t> monstersSeen;
+        std::size_t maxMonsters = 0;
+        bool monsterKinds[3] = {};
+        float monsterMinClearance = 1e9f;   // 몬스터와 단단한 장애물 사이 최소 거리
+        bool monsterOutside = false;
+        int monsterTells = 0, monsterCancels = 0;
+        int wavesSent = 0, heavySent = 0, wavesSpawned = 0, wavesEnded = 0;
+        int myMonsterHits = 0, myKills = 0, knockbacks = 0, staggers = 0;
+        float maxMyDamage = 0.f;
+        float maxLaterCharge = 0.f;         // 두 번째 검기부터 서버가 인정한 충전량의 최대
+        int hitsTaken = 0, deaths = 0, respawns = 0;
         int pongs = 0;
         std::uint32_t lastRttMs = 0;
         std::set<std::uint32_t> movedOthers; // 이동을 받아 본 다른 플레이어
@@ -252,6 +276,7 @@ namespace
                     ok = false, problems += std::format(" 다른 봇 이동 {}/{}", stats_.movedOthers.size(), expectedOthers);
                 ok &= ReportMovement(problems);
                 if (options_.dodgeTest) ok &= ReportDodges(problems);
+                if (options_.monsters || options_.hunt || options_.expectCap) ok &= ReportMonsters(problems);
             }
             std::println("bot-{} 방 {} {} | 입장 {} 이동묶음 {} 확정 {} 예측오차 {:.2f}cm RTT {}ms {}", index_, teamCode_, ok ? "PASS" : "FAIL",
                          static_cast<int>(stats_.enterResult), stats_.moveBatches, stats_.acks, stats_.maxPredictionError, stats_.lastRttMs, problems);
@@ -262,6 +287,46 @@ namespace
         bool RoomFull() const { return stats_.enterResult == EnterResult::RoomFull; }
 
     private:
+        bool ReportMonsters(std::string& problems) const
+        {
+            bool ok = true;
+            std::println("bot-{} 몬스터: 본 수 {} 동시 최대 {} 종류 {}{}{} | 장애물까지 최소 {:.1f}cm | 예고 {} 취소 {} | 검기 보냄 {}(충전 {}) 인정 {} | "
+                         "명중 {} 처치 {} 넉백 {} 경직 {} 최대 피해 {:.0f} | 피격 {} 사망 {} 부활 {}",
+                         index_, stats_.monstersSeen.size(), stats_.maxMonsters, stats_.monsterKinds[0] ? "검" : "", stats_.monsterKinds[1] ? "폭" : "",
+                         stats_.monsterKinds[2] ? "지" : "", stats_.monsterMinClearance, stats_.monsterTells, stats_.monsterCancels, stats_.wavesSent,
+                         stats_.heavySent, stats_.wavesSpawned, stats_.myMonsterHits, stats_.myKills, stats_.knockbacks, stats_.staggers, stats_.maxMyDamage,
+                         stats_.hitsTaken, stats_.deaths, stats_.respawns);
+            const auto Fail = [&](bool bad, const char* text) {
+                if (bad) ok = false, problems += text;
+            };
+            Fail(stats_.maxMonsters < 10, " 몬스터가 10마리 미만");
+            Fail(stats_.maxMonsters > kMaxMonsters, " 몬스터가 상한 초과");
+            // 위치는 cm 정수로 오므로 0.5cm 반올림 + 밀어내기 오차 여유
+            Fail(stats_.monsterMinClearance < game::MonsterTuning::kRadius - 2.f, " 몬스터가 장애물에 파고듦");
+            Fail(stats_.monsterOutside, " 몬스터가 맵 밖");
+            Fail(stats_.monsterTells == 0, " 몬스터 공격 예고 없음");
+            Fail(stats_.deaths > stats_.respawns + 1, " 부활 실패");
+            if (options_.expectCap) Fail(stats_.maxMonsters != kMaxMonsters, " 48마리까지 차지 않음");
+            if (options_.waveCheat)
+            {
+                // 0.7초마다 보내면 거부된 뒤 다음 것은 1.4초 만이라 (1400-600)/2700 = 0.30까지만 모을 수 있었다.
+                std::println("bot-{} 충전 조작: 완충(1.00) 요청 {}회 → 인정 {}회, 인정된 충전량 최대 {:.2f}", index_, stats_.wavesSent, stats_.wavesSpawned,
+                             stats_.maxLaterCharge);
+                Fail(stats_.wavesSent < 5, " 조작 검기를 충분히 보내지 못함");
+                Fail(stats_.wavesSpawned >= stats_.wavesSent, " 충전 없는 검기가 모두 인정됨");
+                Fail(stats_.maxLaterCharge > 0.35f, " 모을 수 없었던 충전량이 인정됨");
+            }
+            else if (options_.hunt)
+            {
+                Fail(stats_.wavesSpawned < 5 || stats_.wavesSpawned * 10 < stats_.wavesSent * 6, " 검기가 인정되지 않음");
+                Fail(stats_.myMonsterHits < 3, " 검기 명중 부족");
+                Fail(stats_.myKills < 1, " 처치 없음");
+                Fail(stats_.knockbacks < 1, " 넉백 확인 안 됨");
+                Fail(stats_.staggers < 1, " 경직 확인 안 됨");
+            }
+            return ok;
+        }
+
         bool ReportMovement(std::string& problems) const
         {
             bool ok = true;
@@ -494,8 +559,44 @@ namespace
                     }
                 }
                 break;
+            case PacketId::S_MonsterBatch:
+                OnMonsterBatch(bytes);
+                break;
+            case PacketId::S_MonsterHit:
+                if (const auto hit = net::Read<S_MonsterHit>(bytes); hit && hit->attackerId == playerId_)
+                {
+                    ++stats_.myMonsterHits;
+                    stats_.maxMyDamage = std::max(stats_.maxMyDamage, hit->damage);
+                    if (hit->hpAfter == 0) ++stats_.myKills;
+                    else knockChecks_.push_back({hit->monsterId, hit->x, hit->y, lastWaveDirX_, lastWaveDirY_, NowMs() + 600, false});
+                }
+                break;
+            case PacketId::S_WaveSpawn:
+                if (const auto wave = net::Read<S_WaveSpawn>(bytes); wave && wave->ownerId == playerId_)
+                {
+                    // 첫 검기는 충전할 시간이 충분했던 것으로 친다. 그 뒤로 인정된 충전량의 최대값을 기록한다.
+                    if (++stats_.wavesSpawned > 1) stats_.maxLaterCharge = std::max(stats_.maxLaterCharge, wave->charge);
+                }
+                break;
+            case PacketId::S_WaveEnd: ++stats_.wavesEnded; break;
+            case PacketId::S_AttackCancel: ++stats_.monsterCancels; break;
+            case PacketId::S_Respawn:
+                if (const auto respawn = net::Read<S_Respawn>(bytes); respawn && respawn->playerId == playerId_)
+                {
+                    // 서버가 시작 위치로 옮겼다. 이미 보낸 입력의 예측은 옛 위치 기준이라 비교하지 않는다.
+                    ++stats_.respawns;
+                    sim_ = move::State{};
+                    sim_.x = respawn->position.x;
+                    sim_.y = respawn->position.y;
+                    skipNextAckCompare_ = true;
+                }
+                break;
             case PacketId::S_AttackStart:
-                if (const auto attack = net::Read<S_AttackStart>(bytes)) OnAttackStart(*attack, self);
+                if (const auto attack = net::Read<S_AttackStart>(bytes))
+                {
+                    if (attack->monsterId != 0) ++stats_.monsterTells;
+                    OnAttackStart(*attack, self);
+                }
                 break;
             case PacketId::S_HitResult:
                 if (const auto hit = net::Read<S_HitResult>(bytes))
@@ -505,6 +606,12 @@ namespace
                     {
                         const auto trial = std::ranges::find(trials_, hit->attackId, &DodgeTrial::attackId);
                         if (trial != trials_.end()) trial->result = hit->result;
+                        if (hit->result == HitResult::Hit) ++stats_.hitsTaken;
+                        if (hit->hpAfter <= 0.f)
+                        {
+                            ++stats_.deaths;
+                            Queue(Make<C_Respawn>()); // 죽으면 바로 부활을 요청한다
+                        }
                     }
                 }
                 break;
@@ -513,6 +620,42 @@ namespace
         }
 
         // 서버 확정 상태로 재조정: 같은 번호의 예측과 비교하고, 확정 상태에서 그 뒤 입력을 다시 돌린다.
+        void OnMonsterBatch(const std::vector<std::byte>& bytes)
+        {
+            S_MonsterBatch batch;
+            if (bytes.size() < sizeof(batch)) return;
+            std::memcpy(&batch, bytes.data(), sizeof(batch));
+            if (bytes.size() != sizeof(batch) + batch.count * sizeof(MonsterEntry)) throw std::runtime_error("S_MonsterBatch 크기 불일치");
+            monsters_.clear();
+            for (int i = 0; i < batch.count; ++i)
+            {
+                MonsterEntry entry;
+                std::memcpy(&entry, bytes.data() + sizeof(batch) + i * sizeof(MonsterEntry), sizeof(entry));
+                monsters_[entry.id] = entry;
+                stats_.monstersSeen.insert(entry.id);
+                if (entry.kind < 3) stats_.monsterKinds[entry.kind] = true;
+                const float x = entry.x, y = entry.y;
+                stats_.monsterOutside |= std::abs(x) > 2800.f || std::abs(y) > 2400.f;
+                for (const move::Obstacle& o : options_.world->obstacles)
+                {
+                    if (move::Solid(o)) stats_.monsterMinClearance = std::min(stats_.monsterMinClearance, move::SignedDistance({x, y}, o.polygon));
+                }
+            }
+            stats_.maxMonsters = std::max<std::size_t>(stats_.maxMonsters, batch.count);
+
+            // 내 검기에 맞은 몬스터가 검기 방향으로 밀렸는지(넉백), 경직 상태가 왔는지 확인한다.
+            const std::uint32_t now = NowMs();
+            std::erase_if(knockChecks_, [&](KnockCheck& check) {
+                const auto it = monsters_.find(check.monsterId);
+                if (it == monsters_.end() || now > check.untilMs) return true;
+                if (!check.staggered && it->second.state == MonsterState::Stagger) check.staggered = true, ++stats_.staggers;
+                const float pushed = (static_cast<float>(it->second.x) - check.x) * check.dirX + (static_cast<float>(it->second.y) - check.y) * check.dirY;
+                if (pushed < 15.f) return false;
+                ++stats_.knockbacks;
+                return true;
+            });
+        }
+
         void OnMoveAck(const S_MoveAck& ack)
         {
             ++stats_.acks;
@@ -521,12 +664,13 @@ namespace
             if (!pending_.empty() && pending_.front().sequence == ack.sequence)
             {
                 const float error = std::hypot(pending_.front().after.x - confirmed.x, pending_.front().after.y - confirmed.y);
-                stats_.maxPredictionError = std::max(stats_.maxPredictionError, error);
+                if (!skipNextAckCompare_) stats_.maxPredictionError = std::max(stats_.maxPredictionError, error);
                 pending_.pop_front();
             }
             if (confirmed.dodgeTick > 0 && (lastAckDodgeTick_ == 0 || confirmed.dodgeTick < lastAckDodgeTick_)) ++stats_.serverDodges;
             lastAckDodgeTick_ = confirmed.dodgeTick;
 
+            skipNextAckCompare_ = false; // 아래 재조정으로 남은 예측이 모두 새 위치 기준이 된다
             sim_ = confirmed;
             for (PendingInput& p : pending_)
             {
@@ -614,7 +758,7 @@ namespace
             {
                 if (target_) Toward(target_->x, target_->y, 150.f); // 상대를 쫓아 1.5m 안쪽 유지
             }
-            else if (!options_.dodgeTest)
+            else if (!options_.dodgeTest && !options_.hunt)
             {
                 // 시작 위치 근처 반지름 120cm 원을 따라 걷는다(약 180cm/s)
                 const float angle = t * 1.5f + phase;
@@ -639,6 +783,7 @@ namespace
             const float phase = static_cast<float>(index_);
             auto nextAttack = start + milliseconds(1500);
             auto nextSend = start;
+            auto nextWave = start + milliseconds(1000);
             int sends = 0;
             SendPing(); // 시계와 왕복 시간을 빨리 잡는다
 
@@ -664,6 +809,36 @@ namespace
                 packet.yaw = std::atan2(sim_.vy, sim_.vx) * 180.f / std::numbers::pi_v<float>;
                 packet.state = sim_.dodgeTick > 0 ? MoveState::Dodge : std::hypot(sim_.vx, sim_.vy) > 10.f ? MoveState::Run : MoveState::Idle;
                 QueueBytes(net::ToBuffer(packet, std::span<const InputCommand>(commands.data(), static_cast<std::size_t>(ticks))));
+
+                // 사냥 봇: 가장 가까운 몬스터에게 검기. 네 번째마다 3.5초 기다렸다가 완충 검기를 쏜다.
+                // --wave-cheat: 충전 시간 없이 0.7초마다 완충 검기를 보낸다(서버가 거부해야 한다).
+                if (options_.hunt && steady_clock::now() >= nextWave)
+                {
+                    const MonsterEntry* nearest = nullptr;
+                    float best = 1300.f;
+                    for (const auto& [id, monster] : monsters_)
+                    {
+                        const float d = std::hypot(static_cast<float>(monster.x) - sim_.x, static_cast<float>(monster.y) - sim_.y);
+                        if (d < best) best = d, nearest = &monster;
+                    }
+                    if (nearest)
+                    {
+                        const bool heavy = options_.waveCheat || stats_.wavesSent % 4 == 3;
+                        lastWaveDirX_ = (static_cast<float>(nearest->x) - sim_.x) / std::max(best, 1.f);
+                        lastWaveDirY_ = (static_cast<float>(nearest->y) - sim_.y) / std::max(best, 1.f);
+                        auto attack = Make<C_Attack>();
+                        attack.sequence = static_cast<std::uint32_t>(++stats_.wavesSent);
+                        attack.pressServerMs = ServerNowMs();
+                        attack.yaw = std::atan2(lastWaveDirY_, lastWaveDirX_) * 180.f / std::numbers::pi_v<float>;
+                        attack.kind = heavy ? AttackKind::HeavyWave : AttackKind::Wave;
+                        attack.charge = heavy ? 1.f : 0.f;
+                        stats_.heavySent += heavy ? 1 : 0;
+                        Queue(attack);
+                        // 다음 발사: 일반 0.75초 뒤. 다음이 완충이면 충전 시간 3.5초를 기다린다.
+                        const bool nextHeavy = !options_.waveCheat && stats_.wavesSent % 4 == 3;
+                        nextWave = steady_clock::now() + milliseconds(options_.waveCheat ? 700 : nextHeavy ? 3500 : 750);
+                    }
+                }
 
                 // PvP 공격 봇: 상대를 향해 1.6초마다 근접 공격(회피 재사용 대기 1초보다 길게)
                 if (IsAttacker() && target_ && steady_clock::now() >= nextAttack)
@@ -703,6 +878,17 @@ namespace
         std::deque<PendingInput> pending_; // 서버 확정을 아직 못 받은 입력
         std::uint32_t inputSequence_ = 0;
         std::uint16_t lastAckDodgeTick_ = 0;
+        bool skipNextAckCompare_ = false; // 부활 직후 첫 확정: 그때까지의 예측은 옛 위치 기준이라 비교하지 않는다
+        std::unordered_map<std::uint16_t, MonsterEntry> monsters_; // 마지막 S_MonsterBatch
+        struct KnockCheck
+        {
+            std::uint16_t monsterId;
+            float x, y, dirX, dirY;
+            std::uint32_t untilMs;
+            bool staggered;
+        };
+        std::vector<KnockCheck> knockChecks_;
+        float lastWaveDirX_ = 1.f, lastWaveDirY_ = 0.f;
         std::optional<Vec3> target_; // 같은 방 다른 플레이어의 마지막 위치(PvP 공격 봇이 노린다)
         ModeRules rules_{};
         std::int64_t serverOffsetMs_ = 0; // 서버 시각 - 내 시각
@@ -738,6 +924,10 @@ int main(int argc, char** argv)
         if (key == "--cheat") { options.cheat = true; continue; }
         if (key == "--wall") { options.wall = true; continue; }
         if (key == "--allow-others") { options.allowOthers = true; continue; }
+        if (key == "--monsters") { options.monsters = true; continue; }
+        if (key == "--expect-cap") { options.expectCap = true; continue; }
+        if (key == "--hunt") { options.hunt = true; continue; }
+        if (key == "--wave-cheat") { options.hunt = options.waveCheat = true; continue; }
         if (key == "--burst") { options.burst = true; continue; }
         if (key == "--dodge-test") { options.dodgeTest = true; continue; }
         if (key == "--dodge-cheat") { options.dodgeCheat = true; continue; }

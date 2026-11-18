@@ -1,5 +1,7 @@
-# Run every automated check: terrain unit test + bot scenarios against a private test server.
-#   .\Scripts\Test.ps1               # builds first, prints one PASS/FAIL line per scenario
+# Run every automated check: unit tests (terrain, monsters) + bot scenarios against two private test servers.
+# Server A (-Port): PvE rooms are empty except for a timed slam pattern, so dodge timing checks stay exact.
+# Server B (-Port + 1): PvE rooms have server monsters (spawning, chasing, attacking).
+#   .\Scripts\Test.ps1               # builds first, prints one PASS/FAIL line per scenario (about 50 s)
 #   .\Scripts\Test.ps1 -NoBuild
 # Logs: build\windows\test-logs\<scenario>.log and server.log. Exit code 1 if anything failed.
 # Scenarios run in parallel, each in its own rooms (distinct --team-base).
@@ -40,24 +42,43 @@ $scenarios = [ordered]@{
     'pvp_stamp_cheat' = '--mode pvp --dodge-test --dodge-cheat --bots 2 --team-size 2 --seconds 16 --team-base 1104'
     'pvp_rtt_lie'     = '--mode pvp --dodge-test --dodge-cheat --rtt-lie 2000 --bots 2 --team-size 2 --seconds 16 --team-base 1105'
 }
+# Monster scenarios run against server B.
+$monsterScenarios = [ordered]@{
+    'mon_hunt'        = '--hunt --bots 1 --seconds 20 --team-base 2000'
+    'mon_team_watch'  = '--monsters --bots 3 --seconds 20 --team-base 2100'
+    'mon_wave_cheat'  = '--wave-cheat --bots 1 --seconds 12 --team-base 2200'
+    'mon_cap_48'      = '--monsters --expect-cap --bots 2 --team-size 2 --seconds 40 --team-base 2300'
+    'mon_hunt_lat150' = '--hunt --bots 1 --seconds 20 --latency 150 --team-base 2400'
+}
 
+[Console]::OutputEncoding = [Text.Encoding]::UTF8 # unit test output is UTF-8
 $failed = 0
 Push-Location $root
 try {
-    & (Join-Path $bin 'ascension_terrain_test.exe') > (Join-Path $logs 'terrain_test.log')
+    & (Join-Path $bin 'ascension_terrain_test.exe') | Out-File -Encoding utf8 (Join-Path $logs 'terrain_test.log')
     $ok = $LASTEXITCODE -eq 0
     if (-not $ok) { $failed++ }
     Write-Host ('{0,-18} {1}' -f 'terrain_test', $(if ($ok) { 'PASS' } else { 'FAIL' }))
+    & (Join-Path $bin 'ascension_monster_test.exe') | Out-File -Encoding utf8 (Join-Path $logs 'monster_test.log')
+    $ok = $LASTEXITCODE -eq 0
+    if (-not $ok) { $failed++ }
+    Write-Host ('{0,-18} {1}' -f 'monster_test', $(if ($ok) { 'PASS' } else { 'FAIL' }))
 
-    # PvE rooms get the server slam test pattern so the dodge scenarios have something to dodge.
-    $server = Start-Process -FilePath (Join-Path $bin 'ascension_server.exe') -ArgumentList "--port $Port --threads 4 --pve-slam-ms 1500" `
+    $server = Start-Process -FilePath (Join-Path $bin 'ascension_server.exe') -ArgumentList "--port $Port --threads 4 --pve-monsters 0 --pve-slam-ms 1500" `
         -RedirectStandardOutput (Join-Path $logs 'server.log') -RedirectStandardError (Join-Path $logs 'server.err.log') -PassThru -NoNewWindow
+    $monsterPort = $Port + 1
+    $monsterServer = Start-Process -FilePath (Join-Path $bin 'ascension_server.exe') -ArgumentList "--port $monsterPort --threads 4" `
+        -RedirectStandardOutput (Join-Path $logs 'server_monsters.log') -RedirectStandardError (Join-Path $logs 'server_monsters.err.log') -PassThru -NoNewWindow
     Start-Sleep -Milliseconds 700
-    if ($server.HasExited) { throw "Test server did not start (port $Port busy?). See $logs\server.log" }
+    if ($server.HasExited -or $monsterServer.HasExited) { throw "Test server did not start (port $Port or $monsterPort busy?). See $logs" }
 
     $running = @()
-    foreach ($name in $scenarios.Keys) {
-        $p = Start-Process -FilePath (Join-Path $bin 'ascension_bot.exe') -ArgumentList "--port $Port $($scenarios[$name])" `
+    $all = @()
+    foreach ($name in $scenarios.Keys) { $all += [pscustomobject]@{ Name = $name; Arguments = "--port $Port $($scenarios[$name])" } }
+    foreach ($name in $monsterScenarios.Keys) { $all += [pscustomobject]@{ Name = $name; Arguments = "--port $monsterPort $($monsterScenarios[$name])" } }
+    foreach ($scenario in $all) {
+        $name = $scenario.Name
+        $p = Start-Process -FilePath (Join-Path $bin 'ascension_bot.exe') -ArgumentList $scenario.Arguments `
             -RedirectStandardOutput (Join-Path $logs "$name.log") -RedirectStandardError (Join-Path $logs "$name.err.log") -PassThru -NoNewWindow
         $null = $p.Handle # keep the handle so ExitCode stays readable after exit
         $running += [pscustomobject]@{ Name = $name; Process = $p }
@@ -71,8 +92,9 @@ try {
 }
 finally {
     if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force }
+    if ($monsterServer -and -not $monsterServer.HasExited) { Stop-Process -Id $monsterServer.Id -Force }
     Pop-Location
     Get-ChildItem $logs -Filter '*.err.log' | Where-Object { $_.Length -eq 0 } | Remove-Item
 }
 if ($failed -gt 0) { Write-Host "$failed FAILED. Logs: $logs"; exit 1 }
-Write-Host "ALL PASS ($($scenarios.Count + 1) checks). Logs: $logs"
+Write-Host "ALL PASS ($($scenarios.Count + $monsterScenarios.Count + 2) checks). Logs: $logs"

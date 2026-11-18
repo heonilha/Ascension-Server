@@ -164,6 +164,13 @@ namespace asc::net
                 return;
             }
             break;
+        case PacketId::C_Respawn:
+            if (const auto packet = Read<C_Respawn>(bytes))
+            {
+                if (room_) room_->Respawn(id_);
+                return;
+            }
+            break;
         case PacketId::C_Attack:
             if (const auto packet = Read<C_Attack>(bytes))
             {
