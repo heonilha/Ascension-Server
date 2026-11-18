@@ -1,13 +1,17 @@
-# Run every automated check: unit tests (terrain, monsters) + bot scenarios against two private test servers.
+# Run every automated check: unit tests (terrain, monsters), Rust port checks + bot scenarios against two private test servers.
+# Rust port: the C++ build writes a movement record, which must equal the committed one; then "cargo test" checks that
+# the Rust crates (rust\) reproduce it bit for bit through FFI. Prints a SKIP line if cargo is not installed.
 # Server A (-Port): PvE rooms are empty except for a timed slam pattern, so dodge timing checks stay exact.
 # Server B (-Port + 1): PvE rooms have server monsters (spawning, chasing, attacking).
 #   .\Scripts\Test.ps1               # builds first, prints one PASS/FAIL line per scenario (about 50 s)
 #   .\Scripts\Test.ps1 -NoBuild
+#   .\Scripts\Test.ps1 -UpdateGolden # after changing protocol\AscensionMovement.h on purpose: rewrite the committed record
 # Logs: build\windows\test-logs\<scenario>.log and server.log. Exit code 1 if anything failed.
 # Scenarios run in parallel, each in its own rooms (distinct --team-base).
 param(
     [int]$Port = 17777,
-    [switch]$NoBuild
+    [switch]$NoBuild,
+    [switch]$UpdateGolden
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -64,6 +68,27 @@ try {
     if (-not $ok) { $failed++ }
     Write-Host ('{0,-18} {1}' -f 'monster_test', $(if ($ok) { 'PASS' } else { 'FAIL' }))
 
+    $goldenFile = Join-Path $root 'rust\crates\movement\tests\golden\movement_v4.txt'
+    $goldenNow = Join-Path $logs 'movement_golden.txt'
+    & (Join-Path $bin 'ascension_movement_golden.exe') 'data\CombatLab.txt' $goldenNow
+    $ok = $LASTEXITCODE -eq 0
+    if ($ok -and $UpdateGolden) { Copy-Item $goldenNow $goldenFile -Force }
+    $ok = $ok -and (((Get-Content $goldenNow -Raw) -replace "`r`n", "`n") -ceq ((Get-Content $goldenFile -Raw) -replace "`r`n", "`n"))
+    if (-not $ok) { $failed++ }
+    Write-Host ('{0,-18} {1}' -f 'movement_golden', $(if ($ok) { 'PASS' } else { 'FAIL' }))
+
+    $extraChecks = 3
+    if (Get-Command cargo -ErrorAction SilentlyContinue) {
+        $extraChecks = 4
+        $manifest = Join-Path $root 'rust\Cargo.toml'
+        $rustLog = Join-Path $logs 'rust_tests.log'
+        cmd /c "cargo test --workspace --manifest-path `"$manifest`" > `"$rustLog`" 2>&1"
+        $ok = $LASTEXITCODE -eq 0
+        if (-not $ok) { $failed++ }
+        Write-Host ('{0,-18} {1}' -f 'rust_tests', $(if ($ok) { 'PASS' } else { 'FAIL' }))
+    }
+    else { Write-Host ('{0,-18} {1}' -f 'rust_tests', 'SKIP (cargo not found: install Rust from https://rustup.rs)') }
+
     $server = Start-Process -FilePath (Join-Path $bin 'ascension_server.exe') -ArgumentList "--port $Port --threads 4 --pve-monsters 0 --pve-slam-ms 1500" `
         -RedirectStandardOutput (Join-Path $logs 'server.log') -RedirectStandardError (Join-Path $logs 'server.err.log') -PassThru -NoNewWindow
     $monsterPort = $Port + 1
@@ -97,4 +122,4 @@ finally {
     Get-ChildItem $logs -Filter '*.err.log' | Where-Object { $_.Length -eq 0 } | Remove-Item
 }
 if ($failed -gt 0) { Write-Host "$failed FAILED. Logs: $logs"; exit 1 }
-Write-Host "ALL PASS ($($scenarios.Count + $monsterScenarios.Count + 2) checks). Logs: $logs"
+Write-Host "ALL PASS ($($scenarios.Count + $monsterScenarios.Count + $extraChecks) checks). Logs: $logs"

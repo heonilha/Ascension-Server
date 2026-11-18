@@ -1,0 +1,17 @@
+# Rust 서버 워크스페이스. C++ 서버(../src)와 나란히 두고 단계별로 옮긴다.
+[workspace]
+resolver = "2"
+members = ["crates/protocol", "crates/movement"]
+
+[workspace.package]
+edition = "2021"
+publish = false
+
+# 시험도 최적화해서 돌린다: 이동 기준 기록 비교가 3만 틱 × 장애물 45개를 계산한다.
+[profile.test]
+opt-level = 2
+
+[workspace.dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+cc = "1"
+asc-protocol = { path = "crates/protocol" }

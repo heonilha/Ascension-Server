@@ -66,3 +66,7 @@ target_link_libraries(ascension_terrain_test PRIVATE ascension_core)
 # ---- 시험: 몬스터·검기 시뮬레이션 단위 시험 ----
 add_executable(ascension_monster_test tools/tests/monster_test.cpp)
 target_link_libraries(ascension_monster_test PRIVATE ascension_core)
+
+# ---- 시험: 이동 계산 기준 기록 (Rust 서버의 FFI 결과와 비트 단위로 비교한다. rust/crates/movement/tests/golden.rs) ----
+add_executable(ascension_movement_golden tools/tests/movement_golden.cpp)
+target_link_libraries(ascension_movement_golden PRIVATE ascension_core)

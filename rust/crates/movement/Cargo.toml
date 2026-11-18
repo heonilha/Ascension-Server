@@ -1,0 +1,12 @@
+[package]
+name = "asc-movement"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+asc-protocol.workspace = true
+
+[build-dependencies]
+cc.workspace = true

@@ -21,7 +21,36 @@ tools/bot/    헤드리스 봇 클라이언트 (동작 확인 + 이후 부하 �
 tools/tests/  단위 시험 (충돌 지형, 몬스터·검기)
 data/         충돌 지형 (클라이언트에서 내보낸 파일, 손으로 고치지 않음)
 Scripts/      Windows용 빌드·실행·시험 스크립트
+rust/         Rust 서버 워크스페이스 (전환 진행 중, 아래 "Rust 전환" 참고)
 ```
+
+## Rust 전환 (진행 중)
+
+서버를 Rust로 옮기는 중이다. **지금 실행하는 서버는 아직 C++ 서버(`src/`)다.** `rust/`에는 토대만 있다.
+
+- **이동 계산은 옮기지 않는다.** 언리얼 클라이언트가 `protocol/AscensionMovement.h`로 미리 움직이므로, Rust 서버도 같은 C++ 헤더를 FFI로 부른다(`rust/crates/movement`). 원본이 하나라서 "같은 입력이면 같은 위치"가 그대로 유지된다. Rust로 다시 쓰면 `sin` 같은 함수의 마지막 비트가 달라질 수 있다.
+- **패킷은 Rust에 한 번 더 정의한다**(`rust/crates/protocol`). 원본은 여전히 `protocol/AscensionProtocol.h`이고, 헤더의 `static_assert` 크기 30개를 Rust에서도 컴파일 시간에 확인한다. 헤더를 바꾸면 `rust/crates/protocol/src/lib.rs`도 같이 바꾼다.
+
+| 크레이트 | 내용 |
+|---|---|
+| `asc-protocol` | 패킷 구조체(`#[repr(C, packed)]`), 열거형, `make`/`read`/이름 복사 |
+| `asc-movement` | `World`(충돌 파일 읽기, 장애물 목록, 거리 계산), `step`(1틱 진행). 계산은 `native/movement_shim.cpp`를 거쳐 C++ 헤더가 한다 |
+
+**결과가 같은지 확인하는 방법**: `ascension_movement_golden`(CMake로 C++ 서버·봇과 같은 설정으로 빌드)이 무작위 걷기 8번 × 3600틱과 지형 거리 격자를 계산해 기록을 만든다. 저장해 둔 기록(`rust/crates/movement/tests/golden/movement_v4.txt`)과 Rust 시험(`tests/golden.rs`)이 FFI로 계산한 결과를 비트 단위로 비교한다. `Test.ps1`이 두 가지를 모두 돌린다. 이동 헤더를 일부러 고쳤다면 `.\Scripts\Test.ps1 -UpdateGolden`으로 기록을 다시 만든다.
+
+```powershell
+cd rust
+cargo test --workspace     # 처음에는 bytemuck·cc를 받아 온다. C++ 연결부를 컴파일하므로 Visual Studio가 필요하다
+```
+
+전환 순서(완료 기준: 기존 C++ 봇과 `Test.ps1` 시나리오가 Rust 서버에서 전부 PASS):
+
+1. ~~프로토콜 크레이트, 이동 FFI, 기준 기록 비교~~ (완료)
+2. 충돌 지형(`CollisionMap`)·전투 규칙(`CombatRules`)·몬스터(`Monsters`)와 단위 시험
+3. 네트워크·방(`Session`, `Room`, `RoomManager`): tokio, 방 하나 = 태스크 하나
+4. `Test.ps1`을 Rust 서버로 돌려 전부 PASS → C++ 서버 소스 제거
+
+전환이 끝날 때까지 프로토콜은 v4로 고정하고, 새 기능(수문장·성장 등)은 두 서버에 동시에 넣지 않는다.
 
 ## 스레드 구조
 
@@ -131,6 +160,7 @@ P0의 "클라이언트가 위치를 보내고 서버가 검증"을 **입력 전�
 
 - **Visual Studio 2022 이상**, 워크로드 "C++를 사용한 데스크톱 개발"(CMake 포함). 언리얼 빌드에 쓰는 것과 같은 설치면 된다.
 - **Git** (CMake가 asio를 받아 올 때 쓴다).
+- **Rust**(선택, Rust 전환 작업·시험용): <https://rustup.rs>에서 stable 설치. 없으면 `Test.ps1`이 Rust 시험을 `SKIP`으로 표시한다.
 
 ### 스크립트로 (권장)
 
@@ -148,7 +178,7 @@ PowerShell에서 저장소 폴더로 이동한 뒤:
 |---|---|
 | `Build.ps1` | `-Debug`(디버그 빌드), `-Clean`(build\windows 삭제 후 빌드) |
 | `RunServer.ps1` | `-Port 7777`, `-Threads N`, `-NoMonsters`(PvE 방에 몬스터 없음), `-PveSlamMs 1500`(PvE 방에 1.5초마다 내려찍기 시험 패턴), `-NoBuild` |
-| `Test.ps1` | `-Port 17777`(시험 서버 포트), `-NoBuild`. 로그는 `build\windows	est-logs` |
+| `Test.ps1` | `-Port 17777`(시험 서버 포트), `-NoBuild`, `-UpdateGolden`(이동 기준 기록 다시 만들기). 로그는 `build\windows	est-logs` |
 
 ### Visual Studio에서
 
@@ -224,6 +254,7 @@ setarch $(uname -m) -R ./build/linux-tsan/bin/ascension_server --port 7778   # �
 | 2026-11-05 | WSL, GCC 14.2 | P1 서버 권한 이동: 봇·언리얼 클라이언트 예측 오차 0.00cm, 속도 조작·기둥 돌파·회피 연타 PASS, TSan 경고 0 |
 | 2026-11-11 | **Windows, MSVC 19.51(VS 2026)** | Windows 전환: `/W4` 경고 0, `Test.ps1` 21개 PASS(회피 판정 비교 110건 불일치 0, 예측 오차 0.00cm). 언리얼 클라이언트 자동 회피가 계획한 75ms 전(74~76ms)에 판정, 시계 오차 1~2ms. Linux GCC 14.2 빌드도 경고 0 |
 | 2026-11-14 | Windows, MSVC 19.51 | P1 몬스터: 단위 시험 30개 + `Test.ps1` 27개 PASS(사냥 봇 명중 42·처치 30·넉백 12, 48마리 상한, 충전 조작 차단). 틱 평균 0.25ms(48마리). 언리얼 클라이언트 자동 사냥 검기 27/27 인정, 예측 오차 0. Linux TSan 경고 0 |
+| 2026-11-14 | Windows, MSVC 19.51 + Rust 1.99.1 | Rust 전환 토대: `Test.ps1` 29개 PASS(기존 27 + 이동 기준 기록 + Rust 시험 11개). FFI 이동 결과가 C++ 빌드 기록 106줄과 비트 단위로 같음(8회 × 3600틱, 벽 접촉 990틱, 회피 156번, 지형 거리 격자). Rust 최적화 0·2·release 모두 같음. clippy 경고 0. Linux 빌드는 아직 확인하지 않음 |
 
 세부 내용은 클라이언트 저장소 `Verification/RESULTS.md`에 날짜별로 있다. WSL에서 서버를 돌릴 때는 WSL 시계가 Windows보다 수 % 빠르게 흘러 클라이언트의 서버 시계 추정에 10~40ms 오차가 있었다. Windows에서 직접 실행하면서 사라졌다.
 
