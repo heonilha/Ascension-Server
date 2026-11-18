@@ -1,7 +1,7 @@
 # Rust 서버 워크스페이스. C++ 서버(../src)와 나란히 두고 단계별로 옮긴다.
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/movement", "crates/game"]
+members = ["crates/protocol", "crates/movement", "crates/game", "crates/server"]
 
 [workspace.package]
 edition = "2021"

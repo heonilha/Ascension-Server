@@ -26,7 +26,12 @@ rust/         Rust 서버 워크스페이스 (전환 진행 중, 아래 "Rust �
 
 ## Rust 전환 (진행 중)
 
-서버를 Rust로 옮기는 중이다. **지금 실행하는 서버는 아직 C++ 서버(`src/`)다.** `rust/`에는 토대만 있다.
+서버를 Rust로 옮기는 중이다. **Rust 서버가 완성돼 C++ 서버와 같은 봇 시나리오를 모두 통과한다.** 기본으로 실행하는 서버는 아직 C++ 서버(`src/`)이고, 언리얼 클라이언트로 Rust 서버를 확인한 뒤 바꾼다.
+
+```powershell
+.\Scripts\RunServer.ps1 -Rust    # Rust 서버 실행(포트·옵션은 C++ 서버와 같다)
+.\Scripts\Test.ps1 -Rust         # 봇 시나리오 27개를 Rust 서버에 돌린다
+```
 
 - **이동 계산은 옮기지 않는다.** 언리얼 클라이언트가 `protocol/AscensionMovement.h`로 미리 움직이므로, Rust 서버도 같은 C++ 헤더를 FFI로 부른다(`rust/crates/movement`). 원본이 하나라서 "같은 입력이면 같은 위치"가 그대로 유지된다. Rust로 다시 쓰면 `sin` 같은 함수의 마지막 비트가 달라질 수 있다.
 - **패킷은 Rust에 한 번 더 정의한다**(`rust/crates/protocol`). 원본은 여전히 `protocol/AscensionProtocol.h`이고, 헤더의 `static_assert` 크기 30개를 Rust에서도 컴파일 시간에 확인한다. 헤더를 바꾸면 `rust/crates/protocol/src/lib.rs`도 같이 바꾼다.
@@ -36,6 +41,10 @@ rust/         Rust 서버 워크스페이스 (전환 진행 중, 아래 "Rust �
 | `asc-protocol` | 패킷 구조체(`#[repr(C, packed)]`), 열거형, `make`/`read`/이름 복사 |
 | `asc-movement` | `World`(충돌 파일 읽기, 장애물 목록, 거리 계산), `step`(1틱 진행). 계산은 `native/movement_shim.cpp`를 거쳐 C++ 헤더가 한다 |
 | `asc-game` | 네트워크를 모르는 게임 계산. `collision`(충돌 지형), `combat_rules`(모드별 규칙·지연 보정), `monsters`(몬스터 AI·증원·검기), `room_layout`(시작 위치·맵 범위). C++ `src/game`의 CollisionMap·CombatRules·Monsters를 옮긴 것 |
+
+| `asc-server` | 실행 파일 `ascension-server`. `session`(연결 하나: 읽기·쓰기 태스크), `room`(방 하나 = 태스크 하나, 20Hz 틱), `room_manager`(정원 확인), `log`(전용 스레드 출력). C++ `src/net`·`Room`·`RoomManager`를 tokio로 옮긴 것 |
+
+**Rust 서버의 태스크 구조**는 C++ 서버의 strand 구조와 같은 원리다. 방의 상태는 방 태스크 하나만 가지고, 세션은 채널로 명령(입장·입력·회피·공격…)을 보낸다. 방 태스크는 받은 순서대로 처리하다가 50ms마다 틱을 돈다. 그래서 방 안에는 락이 없고, 서로 다른 방은 여러 스레드에서 동시에 돌아간다. 락은 `RoomManager`의 정원 확인 한 곳뿐이다. 세션의 송신 대기열이 1024개를 넘으면 끊는 것도 같다. 달라진 점은 방의 명령 대기열에 상한(1024개)이 있어, 가득 차면 보내는 세션의 읽기가 멈춘다는 것이다(입력을 쏟아붓는 클라이언트가 서버 메모리를 늘리지 못한다).
 
 `asc-game`은 Rust로 다시 쓴 코드라서 C++ 원본과 결과가 같은지도 기준 기록으로 확인한다. `ascension_game_golden`이 충돌 격자(6,000여 점)·경로와 시야 4,000쌍·몬스터 시뮬레이션 60초(증원을 끄고 자리를 정해 둔 시나리오)를 계산하고, Rust 시험이 같은 입력으로 비트 단위까지 같은 결과를 내는지 본다(`rust/crates/game/tests/golden.rs`). 증원 자리만은 비교하지 않는다: C++은 `std::mt19937`과 표준 분포를 쓰는데 분포 구현이 컴파일러마다 달라, Rust는 자체 난수(`rng.rs`)를 쓰고 규칙(거리·간격·장애물·상한)을 시험한다.
 
@@ -50,8 +59,8 @@ cargo test --workspace     # 처음에는 bytemuck·cc를 받아 온다. C++ 연
 
 1. ~~프로토콜 크레이트, 이동 FFI, 기준 기록 비교~~ (완료)
 2. ~~충돌 지형(`CollisionMap`)·전투 규칙(`CombatRules`)·몬스터(`Monsters`)와 단위 시험~~ (완료)
-3. 네트워크·방(`Session`, `Room`, `RoomManager`): tokio, 방 하나 = 태스크 하나
-4. `Test.ps1`을 Rust 서버로 돌려 전부 PASS → C++ 서버 소스 제거
+3. ~~네트워크·방(`Session`, `Room`, `RoomManager`): tokio, 방 하나 = 태스크 하나~~ (완료)
+4. ~~`Test.ps1`을 Rust 서버로 돌려 전부 PASS~~ (완료) → 언리얼 클라이언트로 Rust 서버 확인 → 기본 서버를 Rust로 바꾸고 C++ 서버 소스 제거. 봇·기준 기록 도구는 C++ 서버 코드를 쓰므로, 제거 전에 봇을 어떻게 둘지 정한다
 
 전환이 끝날 때까지 프로토콜은 v4로 고정하고, 새 기능(수문장·성장 등)은 두 서버에 동시에 넣지 않는다.
 
@@ -180,8 +189,8 @@ PowerShell에서 저장소 폴더로 이동한 뒤:
 | 스크립트 | 옵션 |
 |---|---|
 | `Build.ps1` | `-Debug`(디버그 빌드), `-Clean`(build\windows 삭제 후 빌드) |
-| `RunServer.ps1` | `-Port 7777`, `-Threads N`, `-NoMonsters`(PvE 방에 몬스터 없음), `-PveSlamMs 1500`(PvE 방에 1.5초마다 내려찍기 시험 패턴), `-NoBuild` |
-| `Test.ps1` | `-Port 17777`(시험 서버 포트), `-NoBuild`, `-UpdateGolden`(이동 기준 기록 다시 만들기). 로그는 `build\windows	est-logs` |
+| `RunServer.ps1` | `-Port 7777`, `-Threads N`, `-NoMonsters`(PvE 방에 몬스터 없음), `-PveSlamMs 1500`(PvE 방에 1.5초마다 내려찍기 시험 패턴), `-NoBuild`, `-Rust`(Rust 서버 실행) |
+| `Test.ps1` | `-Port 17777`(시험 서버 포트), `-NoBuild`, `-UpdateGolden`(기준 기록 다시 만들기), `-Rust`(봇 시나리오를 Rust 서버에 돌린다). 로그는 `build\windows	est-logs` |
 
 ### Visual Studio에서
 
@@ -259,6 +268,7 @@ setarch $(uname -m) -R ./build/linux-tsan/bin/ascension_server --port 7778   # �
 | 2026-11-14 | Windows, MSVC 19.51 | P1 몬스터: 단위 시험 30개 + `Test.ps1` 27개 PASS(사냥 봇 명중 42·처치 30·넉백 12, 48마리 상한, 충전 조작 차단). 틱 평균 0.25ms(48마리). 언리얼 클라이언트 자동 사냥 검기 27/27 인정, 예측 오차 0. Linux TSan 경고 0 |
 | 2026-11-14 | Windows, MSVC 19.51 + Rust 1.99.1 | Rust 전환 토대: `Test.ps1` 29개 PASS(기존 27 + 이동 기준 기록 + Rust 시험 11개). FFI 이동 결과가 C++ 빌드 기록 106줄과 비트 단위로 같음(8회 × 3600틱, 벽 접촉 990틱, 회피 156번, 지형 거리 격자). Rust 최적화 0·2·release 모두 같음. clippy 경고 0. Linux 빌드는 아직 확인하지 않음 |
 | 2026-11-16 | Windows, MSVC 19.51 + Rust 1.99.1 | Rust 전환 2단계(충돌 지형·전투 규칙·몬스터): `Test.ps1` 30개 PASS(기존 27 + 기준 기록 2 + Rust 시험 39개). Rust 이식본이 C++ 기록 28줄과 비트 단위로 같음: 충돌 격자(막힘 566·단단함 757), 경로·시야 4,000쌍(경로 막힘 1,047·시야 막힘 884), 몬스터 1,200틱(생성 42·처치 36·예고 270·돌진 접촉 42·피격 106). C++ 단위 시험 지형 21개·몬스터 30개를 옮겨 모두 PASS, 증원은 48마리 상한에 24.75초 도달. 최적화 0·2·release 모두 같음, clippy 경고 0. Linux 빌드는 아직 확인하지 않음 |
+| 2026-11-16 | Windows, MSVC 19.51 + Rust 1.99.1 | Rust 전환 3단계(네트워크·방): **C++ 봇 시나리오 27개를 Rust 서버에 돌려 전부 PASS**(`Test.ps1 -Rust` 30개 PASS, 2회 연속). 예측 오차 0.00cm(지연 300ms 포함), 회피 판정 비교 105건 불일치 0(경계 제외 4), 속도 조작·충전 조작 차단, 48마리 상한. 사냥 봇 명중 42·처치 30·넉백 12. 틱 평균 0.18ms(48마리·2명, 그중 몬스터 계산 0.12ms). 봇 60개(방 20개) 10초 PASS, 방 20개 모두 정상 종료, 메모리 14MB. Rust 시험 46개(소켓으로 붙는 시험 4개 포함), clippy 경고 0. C++ 서버도 그대로 30개 PASS. **언리얼 클라이언트로는 아직 확인하지 않음.** Linux 빌드도 아직 확인하지 않음 |
 
 세부 내용은 클라이언트 저장소 `Verification/RESULTS.md`에 날짜별로 있다. WSL에서 서버를 돌릴 때는 WSL 시계가 Windows보다 수 % 빠르게 흘러 클라이언트의 서버 시계 추정에 10~40ms 오차가 있었다. Windows에서 직접 실행하면서 사라졌다.
 
