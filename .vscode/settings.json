@@ -1,5 +1,5 @@
 {
   "cmake.useCMakePresets": "always",
-  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/debug/compile_commands.json",
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
   "files.encoding": "utf8"
 }

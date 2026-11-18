@@ -59,9 +59,12 @@ namespace asc::game
         // 서버 틱 주기. 이동 묶음을 이 주기로 보내고, 판정 유예가 끝난 공격을 확정한다.
         static constexpr auto kTickInterval = std::chrono::milliseconds(proto::kServerTickMs); // 20Hz
 
-        // 이동 입력 처리량 제한(속도 조작 방지). 실제 시간 1초에 입력 60개(이동 틱 수)만큼 처리권이 쌓이고,
+        // 이동 입력 처리량 제한(속도 조작 방지). 실제 시간 1초에 입력 60개(이동 틱 수)의 1.03배만큼 처리권이 쌓이고,
         // 입력 하나마다 하나를 쓴다. 네트워크 몰림을 위해 0.5초 분량까지 모아 두고, 넘치는 입력은 버린다.
+        // 3% 여유: 0.5초 넘는 끊김으로 처리권이 바닥나도 다시 차오르게 한다(여유가 없으면 그 뒤 작은 흔들림마다 입력을 버린다).
+        // 대가로 속도 조작의 상한이 달리기 속도의 103%가 된다.
         static constexpr double kMaxInputBacklog = move::kTickRate * 0.5;
+        static constexpr double kInputRateTolerance = 1.03;
         // 현재 데모 맵(개방형 폐허 정원)의 이동 범위. 클라이언트 AAscensionMode::ArenaHalfWidth/Depth와 같다.
         static constexpr float kArenaHalfWidth = 2800.f;
         static constexpr float kArenaHalfDepth = 2400.f;

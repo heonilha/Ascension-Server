@@ -2,7 +2,7 @@
 //
 // ascension_bot [--host 127.0.0.1] [--port 7777] [--bots 6] [--team-size 3] [--seconds 5]
 //               [--team-base 1000] [--mode pve|pvp] [--cheat] [--burst] [--wall] [--map data/CombatLab.txt]
-//               [--latency 0] [--dodge-test] [--dodge-cheat] [--rtt-lie 0]
+//               [--latency 0] [--dodge-test] [--dodge-cheat] [--rtt-lie 0] [--allow-others]
 //
 // 봇 i는 teamCode = team-base + i / team-size 방에 들어가 시작 위치 주변을 원을 그리며 돈다.
 // 끝나면 봇마다 받은 패킷을 확인하고, 문제가 있으면 종료 코드 1을 돌려준다.
@@ -25,9 +25,12 @@
 #include "AscensionProtocol.h"
 #include "AscensionMovement.h"
 #include "game/CollisionMap.h"
+#include "game/Room.h"
 #include "net/Packet.h"
 
 #include <asio.hpp>
+
+#include "core/Platform.h"
 
 #include <algorithm>
 #include <array>
@@ -65,6 +68,7 @@ namespace
         RoomMode mode = RoomMode::PvE;
         bool cheat = false;
         bool wall = false; // 0번 봇이 기둥을 뚫고 지나가려 한다
+        bool allowOthers = false; // 같은 방에 봇이 아닌 플레이어(언리얼 클라이언트)가 있어도 된다
         bool burst = false; // 매 틱 회피를 누른다(재사용 대기 시험)
         const move::World* world = nullptr; // 이동 예측용 지형(서버와 같은 파일)
         int latencyMs = 0;
@@ -243,7 +247,8 @@ namespace
             else
             {
                 if (!stats_.entered) ok = false, problems += " 입장 실패";
-                if (static_cast<int>(stats_.movedOthers.size()) != expectedOthers)
+                if (options_.allowOthers ? static_cast<int>(stats_.movedOthers.size()) < expectedOthers
+                                         : static_cast<int>(stats_.movedOthers.size()) != expectedOthers)
                     ok = false, problems += std::format(" 다른 봇 이동 {}/{}", stats_.movedOthers.size(), expectedOthers);
                 ok &= ReportMovement(problems);
                 if (options_.dodgeTest) ok &= ReportDodges(problems);
@@ -266,9 +271,12 @@ namespace
             const float rate = elapsed > 0.5f ? std::hypot(stats_.lastAck.x - stats_.firstAck.x, stats_.lastAck.y - stats_.firstAck.y) / elapsed : 0.f;
             if (cheater)
             {
-                // 3배 빠른 입력이면 예측은 크게 어긋나고, 서버 위치는 달리기 속도(450) 근처에 머문다
-                std::println("bot-{} 속도 조작: 서버 이동 속도 {:.0f}cm/s, 예측 오차 최대 {:.0f}cm", index_, rate, stats_.maxPredictionError);
-                if (rate > move::kRunSpeed * 1.1f) ok = false, problems += std::format(" 서버가 빠른 이동을 허용 {:.0f}cm/s", rate);
+                // 3배 빠른 입력이면 예측은 크게 어긋나고, 서버 위치는 처리권이 허용하는 속도에 머문다:
+                // 달리기 450 × 여유 1.03 + 처음 모아 둔 0.5초 분량을 시험 시간으로 나눈 값
+                const float limit = move::kRunSpeed * (static_cast<float>(game::Room::kInputRateTolerance) +
+                                                       static_cast<float>(game::Room::kMaxInputBacklog) / move::kTickRate / std::max(elapsed, 1.f));
+                std::println("bot-{} 속도 조작: 서버 이동 속도 {:.0f}cm/s (허용 상한 {:.0f}), 예측 오차 최대 {:.0f}cm", index_, rate, limit, stats_.maxPredictionError);
+                if (rate > limit * 1.02f) ok = false, problems += std::format(" 서버가 빠른 이동을 허용 {:.0f}cm/s", rate);
                 if (stats_.maxPredictionError < 10.f) ok = false, problems += " 넘친 입력이 버려지지 않음";
                 return ok;
             }
@@ -586,7 +594,8 @@ namespace
         {
             auto ping = Make<C_Ping>();
             ping.clientTimeMs = NowMs();
-            ping.lastRttMs = options_.rttLie > 0 ? options_.rttLie : stats_.lastRttMs;
+            // 0은 "아직 잰 적 없음"이다. 같은 PC에서는 왕복이 1ms 미만이라 0으로 재지므로, 잰 뒤에는 최소 1로 알린다.
+            ping.lastRttMs = options_.rttLie > 0 ? options_.rttLie : stats_.pongs > 0 ? std::max<std::uint32_t>(1, stats_.lastRttMs) : 0;
             reportedRttMs_ = ping.lastRttMs;
             Queue(ping);
         }
@@ -719,14 +728,16 @@ namespace
 
 int main(int argc, char** argv)
 {
+    InitPlatform();
     Options options;
-    std::string mapPath = "data/CombatLab.txt";
+    std::string mapPath = FindDataFile(argv[0], "data/CombatLab.txt");
     for (int i = 1; i < argc; ++i)
     {
         const std::string_view key = argv[i];
         const std::string_view value = i + 1 < argc ? argv[i + 1] : "";
         if (key == "--cheat") { options.cheat = true; continue; }
         if (key == "--wall") { options.wall = true; continue; }
+        if (key == "--allow-others") { options.allowOthers = true; continue; }
         if (key == "--burst") { options.burst = true; continue; }
         if (key == "--dodge-test") { options.dodgeTest = true; continue; }
         if (key == "--dodge-cheat") { options.dodgeCheat = true; continue; }
@@ -743,7 +754,7 @@ int main(int argc, char** argv)
         ++i;
     }
 
-    // 이동 예측에 서버와 같은 지형을 쓴다(저장소 루트에서 실행)
+    // 이동 예측에 서버와 같은 지형을 쓴다
     std::string mapError;
     const auto map = game::CollisionMap::Load(mapPath, mapError);
     if (!map)

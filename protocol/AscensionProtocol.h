@@ -232,7 +232,7 @@ namespace asc::proto
     {
         PacketHeader header;
         std::uint32_t clientTimeMs;
-        std::uint32_t lastRttMs; // 직전에 잰 왕복 시간(0 = 아직 없음). 서버는 판정 유예 계산에 쓰고 상한으로 제한한다
+        std::uint32_t lastRttMs; // 직전에 잰 왕복 시간(0 = 아직 없음, 잰 뒤에는 1 이상). 서버는 판정 유예 계산에 쓰고 상한으로 제한한다
     };
 
     struct S_Pong
