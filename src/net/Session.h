@@ -53,6 +53,7 @@ namespace asc::net
         std::deque<Buffer> writeQueue_;
         game::RoomManager& rooms_;
         std::shared_ptr<game::Room> room_;
+        proto::RoomMode mode_ = proto::RoomMode::PvE;
         std::uint32_t teamCode_ = 0;
         const std::uint32_t id_;
         std::string name_;
