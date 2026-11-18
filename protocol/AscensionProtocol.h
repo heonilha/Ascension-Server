@@ -15,7 +15,7 @@
 
 namespace asc::proto
 {
-    inline constexpr std::uint16_t kVersion = 2;
+    inline constexpr std::uint16_t kVersion = 3;
     inline constexpr std::uint16_t kMaxPacketSize = 4096;
     inline constexpr std::size_t kNameLength = 32;     // UTF-8, 널 문자 포함
     inline constexpr std::uint8_t kMaxRoomPlayers = 3; // PvE 층 인스턴스 최대 인원(팀원 수)
@@ -31,15 +31,16 @@ namespace asc::proto
         S_EnterRoom = 4,
         S_PlayerJoined = 5,
         S_PlayerLeft = 6,
-        C_Move = 7,
+        // 7(C_Move), 9(S_Correction)는 v3에서 입력 전송 + 서버 이동 계산으로 바뀌어 없어졌다
         S_MoveBatch = 8,
-        S_Correction = 9,
         C_Ping = 10,
         S_Pong = 11,
         C_Dodge = 12,
         C_Attack = 13,
         S_AttackStart = 14,
         S_HitResult = 15,
+        C_Input = 16,
+        S_MoveAck = 17,
     };
 
     // 방 종류. 같은 teamCode라도 모드가 다르면 다른 방이다.
@@ -179,17 +180,42 @@ namespace asc::proto
         std::uint32_t playerId;
     };
 
-    // ---- 이동 ----
-    // P0 단계: 클라이언트가 위치를 보내고 서버가 속도·범위를 검증한다.
-    // 서버에 충돌 지형이 생기면 입력 전송 + 서버 이동 계산으로 바꾼다.
-    struct C_Move
+    // ---- 이동 (v3: 서버 권한) ----
+    // 클라이언트는 60Hz 틱마다 입력 하나를 만들어 몇 개씩 묶어 보낸다. 서버는 AscensionMovement.h로
+    // 입력을 하나씩 계산해 위치를 정하고, 마지막으로 처리한 입력 번호와 상태를 S_MoveAck로 돌려준다.
+    inline constexpr std::uint8_t kMaxInputsPerPacket = 16;
+
+    struct InputCommand
+    {
+        float moveX, moveY; // 월드 좌표 이동 방향(길이 1 이하)
+        std::uint8_t flags; // move::kInputDodge
+        float dodgeX, dodgeY;
+    };
+
+    // 뒤에 InputCommand[count]가 붙는다. 번호는 firstSequence부터 1씩 늘어난다.
+    struct C_Input
+    {
+        PacketHeader header;
+        std::uint32_t firstSequence;
+        float yaw;       // 바라보는 방향(연출용)
+        MoveState state; // 애니메이션 상태(연출용)
+        std::uint8_t count;
+    };
+
+    // 이동 계산 상태(AscensionMovement.h move::State와 같은 내용)
+    struct MoveSimState
+    {
+        float x, y, vx, vy;
+        std::uint16_t dodgeTick, cooldown;
+        float dodgeX, dodgeY;
+    };
+
+    // 서버가 sequence번 입력까지 처리한 결과. 입력을 보낸 본인에게만 보낸다.
+    struct S_MoveAck
     {
         PacketHeader header;
         std::uint32_t sequence;
-        Vec3 position;
-        Vec3 velocity;
-        float yaw;
-        MoveState state;
+        MoveSimState state;
     };
 
     // 뒤에 MoveEntry[count]가 붙는다. 서버 틱마다 바뀐 플레이어만 보낸다.
@@ -200,13 +226,6 @@ namespace asc::proto
         std::uint8_t count;
     };
 
-    // 서버가 이동을 거부했다. 클라이언트는 이 위치로 되돌린다.
-    struct S_Correction
-    {
-        PacketHeader header;
-        std::uint32_t sequence;
-        Vec3 position;
-    };
 
     // ---- 지연 측정 ----
     struct C_Ping
@@ -284,9 +303,11 @@ namespace asc::proto
     static_assert(sizeof(S_EnterRoom) == 42);
     static_assert(sizeof(S_PlayerJoined) == 56);
     static_assert(sizeof(S_PlayerLeft) == 8);
-    static_assert(sizeof(C_Move) == 37);
+    static_assert(sizeof(InputCommand) == 17);
+    static_assert(sizeof(C_Input) == 14);
+    static_assert(sizeof(MoveSimState) == 28);
+    static_assert(sizeof(S_MoveAck) == 36);
     static_assert(sizeof(S_MoveBatch) == 9);
-    static_assert(sizeof(S_Correction) == 20);
     static_assert(sizeof(C_Ping) == 12);
     static_assert(sizeof(S_Pong) == 12);
     static_assert(sizeof(C_Dodge) == 16);
@@ -302,9 +323,9 @@ namespace asc::proto
     template <> struct IdOf<S_EnterRoom> { static constexpr PacketId value = PacketId::S_EnterRoom; };
     template <> struct IdOf<S_PlayerJoined> { static constexpr PacketId value = PacketId::S_PlayerJoined; };
     template <> struct IdOf<S_PlayerLeft> { static constexpr PacketId value = PacketId::S_PlayerLeft; };
-    template <> struct IdOf<C_Move> { static constexpr PacketId value = PacketId::C_Move; };
+    template <> struct IdOf<C_Input> { static constexpr PacketId value = PacketId::C_Input; };
+    template <> struct IdOf<S_MoveAck> { static constexpr PacketId value = PacketId::S_MoveAck; };
     template <> struct IdOf<S_MoveBatch> { static constexpr PacketId value = PacketId::S_MoveBatch; };
-    template <> struct IdOf<S_Correction> { static constexpr PacketId value = PacketId::S_Correction; };
     template <> struct IdOf<C_Ping> { static constexpr PacketId value = PacketId::C_Ping; };
     template <> struct IdOf<S_Pong> { static constexpr PacketId value = PacketId::S_Pong; };
     template <> struct IdOf<C_Dodge> { static constexpr PacketId value = PacketId::C_Dodge; };

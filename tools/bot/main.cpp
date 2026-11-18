@@ -1,16 +1,18 @@
 // 헤드리스 봇 클라이언트. 서버 동작 확인과 이후 부하 테스트에 쓴다.
 //
 // ascension_bot [--host 127.0.0.1] [--port 7777] [--bots 6] [--team-size 3] [--seconds 5]
-//               [--team-base 1000] [--mode pve|pvp] [--cheat] [--burst] [--wall]
+//               [--team-base 1000] [--mode pve|pvp] [--cheat] [--burst] [--wall] [--map data/CombatLab.txt]
 //               [--latency 0] [--dodge-test] [--dodge-cheat] [--rtt-lie 0]
 //
 // 봇 i는 teamCode = team-base + i / team-size 방에 들어가 시작 위치 주변을 원을 그리며 돈다.
 // 끝나면 봇마다 받은 패킷을 확인하고, 문제가 있으면 종료 코드 1을 돌려준다.
 //   - 같은 방의 다른 봇 이동을 모두 받았는가
-//   - 정상 이동에 S_Correction이 오지 않았는가
+//   - 이동(v3 서버 권한): 봇도 같은 이동 코드(AscensionMovement.h)로 미리 움직이고, 서버 확정 상태(S_MoveAck)와
+//     같은 입력 번호의 예측 위치를 비교한다. 정상 봇은 예측 오차가 1cm 미만이어야 한다.
 //   - 정원을 넘긴 봇은 RoomFull을 받았는가
-//   - --cheat: 0번 봇이 순간이동을 시도하면 S_Correction을 받는가
-//   - --wall: PvE 0번 봇이 남쪽 부서진 기둥(100,-650)을 뚫고 걸어가면 S_Correction을 받는가(서버 충돌 지형)
+//   - --cheat: 0번 봇이 입력을 3배 빠르게 보내도(속도 조작) 서버 위치가 달리기 속도를 넘지 않는가
+//   - --wall: PvE 0번 봇이 남쪽 부서진 기둥(100,-650)으로 계속 걸어도 서버 위치가 기둥에 파고들지 않는가
+//   - --burst: 매 틱 회피를 눌러도 재사용 대기가 지켜지고 예측이 어긋나지 않는가
 //
 // 회피 판정 시험(--dodge-test)
 //   봇은 제자리에 서서, 자기를 노린 공격(S_AttackStart)마다 정해 둔 시각에 회피를 누른다.
@@ -21,11 +23,14 @@
 //   --dodge-cheat: 늦게 누르고 누른 시각을 앞당겨 보내는 조작을 섞는다. 상한 밖이면 피격이어야 한다.
 //   --rtt-lie: 서버에 알려 주는 왕복 시간을 이 값으로 속인다(되감기 상한 시험).
 #include "AscensionProtocol.h"
+#include "AscensionMovement.h"
+#include "game/CollisionMap.h"
 #include "net/Packet.h"
 
 #include <asio.hpp>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -60,7 +65,8 @@ namespace
         RoomMode mode = RoomMode::PvE;
         bool cheat = false;
         bool wall = false; // 0번 봇이 기둥을 뚫고 지나가려 한다
-        bool burst = false; // 회피 크기 이동 3개를 한꺼번에 보낸다(네트워크 몰림 재현)
+        bool burst = false; // 매 틱 회피를 누른다(재사용 대기 시험)
+        const move::World* world = nullptr; // 이동 예측용 지형(서버와 같은 파일)
         int latencyMs = 0;
         bool dodgeTest = false;
         bool dodgeCheat = false;
@@ -74,7 +80,12 @@ namespace
         int moveBatches = 0;
         int joined = 0;
         int left = 0;
-        int corrections = 0;
+        int acks = 0;
+        float maxPredictionError = 0.f;     // 같은 입력 번호에서 내 예측과 서버 확정 위치의 차이
+        float minClearance = 1e9f;          // 서버 확정 위치와 단단한 장애물 사이 최소 거리(반지름 빼기 전)
+        float firstAckTime = -1.f, lastAckTime = 0.f;
+        move::Vec2 firstAck{}, lastAck{};
+        int serverDodges = 0;               // 서버 상태에서 회피가 시작된 횟수
         int pongs = 0;
         std::uint32_t lastRttMs = 0;
         std::set<std::uint32_t> movedOthers; // 이동을 받아 본 다른 플레이어
@@ -191,7 +202,8 @@ namespace
                 if (reply.result != EnterResult::Ok) co_return; // 정원 초과 등: 여기서 끝
                 stats_.entered = true;
                 spawn_ = reply.spawnPosition;
-                position_ = spawn_;
+                sim_.x = spawn_.x;
+                sim_.y = spawn_.y;
                 rules_ = reply.rules;
                 // 첫 시계 추정(왕복 시간을 모르므로 거칠다). S_Pong이 오면 더 정확한 값으로 바꾼다.
                 serverOffsetMs_ = static_cast<std::int64_t>(reply.serverTimeMs) - NowMs();
@@ -233,13 +245,11 @@ namespace
                 if (!stats_.entered) ok = false, problems += " 입장 실패";
                 if (static_cast<int>(stats_.movedOthers.size()) != expectedOthers)
                     ok = false, problems += std::format(" 다른 봇 이동 {}/{}", stats_.movedOthers.size(), expectedOthers);
-                const bool cheater = (options_.cheat || options_.wall) && index_ == 0;
-                if (cheater && stats_.corrections == 0) ok = false, problems += options_.wall ? " 기둥 통과가 거부되지 않음" : " 순간이동이 거부되지 않음";
-                if (!cheater && stats_.corrections > 0) ok = false, problems += std::format(" 정상 이동 거부 {}회", stats_.corrections);
+                ok &= ReportMovement(problems);
                 if (options_.dodgeTest) ok &= ReportDodges(problems);
             }
-            std::println("bot-{} 방 {} {} | 입장 {} 이동묶음 {} 보정 {} RTT {}ms {}", index_, teamCode_, ok ? "PASS" : "FAIL",
-                         static_cast<int>(stats_.enterResult), stats_.moveBatches, stats_.corrections, stats_.lastRttMs, problems);
+            std::println("bot-{} 방 {} {} | 입장 {} 이동묶음 {} 확정 {} 예측오차 {:.2f}cm RTT {}ms {}", index_, teamCode_, ok ? "PASS" : "FAIL",
+                         static_cast<int>(stats_.enterResult), stats_.moveBatches, stats_.acks, stats_.maxPredictionError, stats_.lastRttMs, problems);
             return ok;
         }
 
@@ -247,6 +257,38 @@ namespace
         bool RoomFull() const { return stats_.enterResult == EnterResult::RoomFull; }
 
     private:
+        bool ReportMovement(std::string& problems) const
+        {
+            bool ok = true;
+            if (stats_.acks == 0) return problems += " 이동 확정을 받지 못함", false;
+            const bool cheater = options_.cheat && index_ == 0;
+            const float elapsed = stats_.lastAckTime - stats_.firstAckTime;
+            const float rate = elapsed > 0.5f ? std::hypot(stats_.lastAck.x - stats_.firstAck.x, stats_.lastAck.y - stats_.firstAck.y) / elapsed : 0.f;
+            if (cheater)
+            {
+                // 3배 빠른 입력이면 예측은 크게 어긋나고, 서버 위치는 달리기 속도(450) 근처에 머문다
+                std::println("bot-{} 속도 조작: 서버 이동 속도 {:.0f}cm/s, 예측 오차 최대 {:.0f}cm", index_, rate, stats_.maxPredictionError);
+                if (rate > move::kRunSpeed * 1.1f) ok = false, problems += std::format(" 서버가 빠른 이동을 허용 {:.0f}cm/s", rate);
+                if (stats_.maxPredictionError < 10.f) ok = false, problems += " 넘친 입력이 버려지지 않음";
+                return ok;
+            }
+            if (stats_.maxPredictionError >= 1.f) ok = false, problems += std::format(" 예측 오차 {:.2f}cm", stats_.maxPredictionError);
+            if (options_.wall && index_ == 0)
+            {
+                std::println("bot-{} 기둥 돌파: 장애물까지 최소 {:.2f}cm (반지름 {:.0f})", index_, stats_.minClearance, move::kRadius);
+                if (stats_.minClearance < move::kRadius - 0.5f) ok = false, problems += " 장애물에 파고듦";
+                if (stats_.minClearance > move::kRadius + 5.f) ok = false, problems += " 기둥에 닿지 않음(시험 경로 확인)";
+            }
+            if (options_.burst)
+            {
+                // 회피 1회 = 39틱, 재사용 58틱 → 초당 최대 약 1.03회
+                const float maxDodges = elapsed * move::kTickRate / move::kDodgeCooldownTicks + 1.f;
+                std::println("bot-{} 회피 연타: 서버 회피 {}회 (허용 최대 {:.1f})", index_, stats_.serverDodges, maxDodges);
+                if (stats_.serverDodges < 2 || stats_.serverDodges > maxDodges) ok = false, problems += " 회피 재사용 대기 위반";
+            }
+            return ok;
+        }
+
         bool IsAttacker() const { return options_.dodgeTest && options_.mode == RoomMode::PvP && index_ == 0; }
 
         std::uint32_t ServerNowMs() const { return static_cast<std::uint32_t>(static_cast<std::int64_t>(NowMs()) + serverOffsetMs_); }
@@ -321,6 +363,12 @@ namespace
             std::vector<std::byte> bytes(sizeof(T));
             std::memcpy(bytes.data(), &packet, sizeof(T));
             outbox_.push_back({SteadyClock::now() + std::chrono::milliseconds(options_.latencyMs), std::move(bytes)});
+            outSignal_.cancel();
+        }
+
+        void QueueBytes(const net::Buffer& buffer)
+        {
+            outbox_.push_back({SteadyClock::now() + std::chrono::milliseconds(options_.latencyMs), *buffer});
             outSignal_.cancel();
         }
 
@@ -421,12 +469,8 @@ namespace
                 if (const auto joined = net::Read<S_PlayerJoined>(bytes)) target_ = joined->player.position;
                 break;
             case PacketId::S_PlayerLeft: ++stats_.left; break;
-            case PacketId::S_Correction:
-                if (const auto correction = net::Read<S_Correction>(bytes))
-                {
-                    ++stats_.corrections;
-                    position_ = correction->position; // 서버가 정한 위치로 되돌린다
-                }
+            case PacketId::S_MoveAck:
+                if (const auto ack = net::Read<S_MoveAck>(bytes)) OnMoveAck(*ack);
                 break;
             case PacketId::S_Pong:
                 if (const auto pong = net::Read<S_Pong>(bytes))
@@ -460,6 +504,38 @@ namespace
             }
         }
 
+        // 서버 확정 상태로 재조정: 같은 번호의 예측과 비교하고, 확정 상태에서 그 뒤 입력을 다시 돌린다.
+        void OnMoveAck(const S_MoveAck& ack)
+        {
+            ++stats_.acks;
+            const move::State confirmed = move::FromProto(ack.state);
+            while (!pending_.empty() && pending_.front().sequence < ack.sequence) pending_.pop_front();
+            if (!pending_.empty() && pending_.front().sequence == ack.sequence)
+            {
+                const float error = std::hypot(pending_.front().after.x - confirmed.x, pending_.front().after.y - confirmed.y);
+                stats_.maxPredictionError = std::max(stats_.maxPredictionError, error);
+                pending_.pop_front();
+            }
+            if (confirmed.dodgeTick > 0 && (lastAckDodgeTick_ == 0 || confirmed.dodgeTick < lastAckDodgeTick_)) ++stats_.serverDodges;
+            lastAckDodgeTick_ = confirmed.dodgeTick;
+
+            sim_ = confirmed;
+            for (PendingInput& p : pending_)
+            {
+                move::Step(sim_, p.input, *options_.world);
+                p.after = sim_;
+            }
+
+            const float now = std::chrono::duration<float>(SteadyClock::now().time_since_epoch()).count();
+            if (stats_.firstAckTime < 0.f) stats_.firstAckTime = now, stats_.firstAck = {confirmed.x, confirmed.y};
+            stats_.lastAckTime = now;
+            stats_.lastAck = {confirmed.x, confirmed.y};
+            for (const move::Obstacle& o : options_.world->obstacles)
+            {
+                if (move::Solid(o)) stats_.minClearance = std::min(stats_.minClearance, move::SignedDistance({confirmed.x, confirmed.y}, o.polygon));
+            }
+        }
+
         void OnAttackStart(const S_AttackStart& attack, const std::shared_ptr<Bot>& self)
         {
             if (attack.attackerId == playerId_)
@@ -468,7 +544,7 @@ namespace
                 return;
             }
             if (!options_.dodgeTest || IsAttacker()) return;
-            const float distance = std::hypot(position_.x - attack.center.x, position_.y - attack.center.y);
+            const float distance = std::hypot(sim_.x - attack.center.x, sim_.y - attack.center.y);
             if (distance > attack.radius) return; // 나를 노린 공격이 아니다
 
             const std::vector<DodgePlan> plans = Plans();
@@ -515,79 +591,70 @@ namespace
             Queue(ping);
         }
 
+        // 이번 틱의 이동 입력(월드 방향). 시나리오마다 다르다.
+        move::Input NextInput(float t, float phase) const
+        {
+            move::Input input;
+            const auto Toward = [&](float x, float y, float stopDistance) {
+                const float dx = x - sim_.x, dy = y - sim_.y, d = std::hypot(dx, dy);
+                if (d > stopDistance) input.moveX = dx / d, input.moveY = dy / d;
+            };
+            if (options_.wall && index_ == 0) Toward(100.f + (100.f - spawn_.x), -650.f + (-650.f - spawn_.y), 1.f); // 기둥 너머로 곧장
+            else if (options_.cheat && index_ == 0) input.moveX = 1.f; // 동쪽으로 곧장(빈 길)
+            else if (IsAttacker())
+            {
+                if (target_) Toward(target_->x, target_->y, 150.f); // 상대를 쫓아 1.5m 안쪽 유지
+            }
+            else if (!options_.dodgeTest)
+            {
+                // 시작 위치 근처 반지름 120cm 원을 따라 걷는다(약 180cm/s)
+                const float angle = t * 1.5f + phase;
+                Toward(spawn_.x + 120.f * (std::cos(angle) - std::cos(phase)), spawn_.y + 120.f * (std::sin(angle) - std::sin(phase)), 5.f);
+                const float length = std::hypot(input.moveX, input.moveY);
+                if (length > 0.f) input.moveX *= 0.4f, input.moveY *= 0.4f;
+            }
+            // 회피 시험 방어 봇은 제자리에 선다(무적 판정만 보도록)
+            if (options_.burst)
+            {
+                input.flags |= move::kInputDodge;
+                input.dodgeX = 1.f;
+            }
+            return input;
+        }
+
         asio::awaitable<void> MoveLoop()
         {
             using namespace std::chrono;
             const auto start = steady_clock::now();
             const auto end = start + seconds(options_.seconds);
-            std::uint32_t sequence = 0;
             const float phase = static_cast<float>(index_);
             auto nextAttack = start + milliseconds(1500);
+            auto nextSend = start;
+            int sends = 0;
             SendPing(); // 시계와 왕복 시간을 빨리 잡는다
 
             while (steady_clock::now() < end)
             {
-                timer_.expires_after(milliseconds(66)); // 약 15Hz
+                // 30Hz로 보낸다. 한 번에 2틱(60Hz) 분량, 속도 조작 봇은 6틱 분량
+                nextSend += microseconds(1'000'000 / 30);
+                timer_.expires_at(nextSend);
                 co_await timer_.async_wait(asio::use_awaitable);
-
                 const float t = duration<float>(steady_clock::now() - start).count();
-                const Vec3 previous = position_;
-                float yaw = 0.f;
-                if (!options_.dodgeTest)
-                {
-                    const float angle = t * 1.5f + phase; // 반지름 120cm, 약 180cm/s
-                    position_ = {spawn_.x + 120.f * std::cos(angle) - 120.f * std::cos(phase), spawn_.y + 120.f * std::sin(angle) - 120.f * std::sin(phase), spawn_.z};
-                    yaw = angle * 57.2958f;
-                }
-                else if (IsAttacker() && target_)
-                {
-                    // PvP 공격 봇은 상대를 쫓아가 1.5m 안쪽을 유지한다(상대가 회피로 멀어져도 다음 공격이 닿게).
-                    // 400cm/s: 달리기 속도 이하라 서버 이동 검증에 걸리지 않는다.
-                    const float dx = target_->x - position_.x, dy = target_->y - position_.y;
-                    const float distance = std::hypot(dx, dy);
-                    if (distance > 150.f)
-                    {
-                        const float step = std::min(400.f * 0.066f, distance - 150.f);
-                        position_.x += dx / distance * step;
-                        position_.y += dy / distance * step;
-                    }
-                }
-                // 방어 봇은 제자리에 선다(무적 판정만 보도록 범위 밖으로 나가지 않는다).
+                const int ticks = options_.cheat && index_ == 0 ? 6 : 2;
 
-                // --wall: 시작 위치에서 남쪽 부서진 기둥 중심을 지나 그 너머까지 300cm/s로 곧장 걷는다.
-                // 막히면 서버가 되돌린 위치에서 다시 같은 방향으로 민다.
-                if (options_.wall && index_ == 0)
+                std::array<InputCommand, kMaxInputsPerPacket> commands{};
+                for (int i = 0; i < ticks; ++i)
                 {
-                    const float dx = 100.f - spawn_.x, dy = -650.f - spawn_.y, length = std::hypot(dx, dy);
-                    position_ = {previous.x + dx / length * 300.f * 0.066f, previous.y + dy / length * 300.f * 0.066f, spawn_.z};
+                    const move::Input input = NextInput(t, phase);
+                    move::Step(sim_, input, *options_.world);
+                    pending_.push_back({++inputSequence_, input, sim_});
+                    commands[i] = {input.moveX, input.moveY, input.flags, input.dodgeX, input.dodgeY};
                 }
-
-                // --cheat: 2초쯤 한 번 40m 순간이동을 시도한다
-                if (options_.cheat && index_ == 0 && !cheated_ && t > 2.f)
-                {
-                    cheated_ = true;
-                    position_.x += 4000.f;
-                }
-
-                auto move = Make<C_Move>();
-                move.sequence = ++sequence;
-                move.position = position_;
-                move.velocity = {(position_.x - previous.x) / 0.066f, (position_.y - previous.y) / 0.066f, 0.f};
-                move.yaw = yaw;
-                move.state = options_.dodgeTest ? MoveState::Idle : MoveState::Run;
-                Queue(move);
-
-                // --burst: 1초마다 회피 한 번 분량(60cm × 3)을 기다림 없이 연달아 보낸다. 거부되면 안 된다.
-                if (options_.burst && sequence % 15 == 7)
-                {
-                    for (int step = 1; step <= 3; ++step)
-                    {
-                        move.sequence = ++sequence;
-                        move.position.x = position_.x + 60.f * static_cast<float>(step);
-                        move.state = MoveState::Dodge;
-                        Queue(move);
-                    }
-                }
+                auto packet = Make<C_Input>();
+                packet.firstSequence = inputSequence_ - static_cast<std::uint32_t>(ticks) + 1;
+                packet.yaw = std::atan2(sim_.vy, sim_.vx) * 180.f / std::numbers::pi_v<float>;
+                packet.state = sim_.dodgeTick > 0 ? MoveState::Dodge : std::hypot(sim_.vx, sim_.vy) > 10.f ? MoveState::Run : MoveState::Idle;
+                QueueBytes(net::ToBuffer(packet, std::span<const InputCommand>(commands.data(), static_cast<std::size_t>(ticks))));
 
                 // PvP 공격 봇: 상대를 향해 1.6초마다 근접 공격(회피 재사용 대기 1초보다 길게)
                 if (IsAttacker() && target_ && steady_clock::now() >= nextAttack)
@@ -596,12 +663,12 @@ namespace
                     auto attack = Make<C_Attack>();
                     attack.sequence = ++stats_.attacksSent;
                     attack.pressServerMs = ServerNowMs();
-                    attack.yaw = std::atan2(target_->y - position_.y, target_->x - position_.x) * 180.f / std::numbers::pi_v<float>;
+                    attack.yaw = std::atan2(target_->y - sim_.y, target_->x - sim_.x) * 180.f / std::numbers::pi_v<float>;
                     attack.kind = AttackKind::Slash;
                     Queue(attack);
                 }
 
-                if (sequence % 15 == 0) SendPing();
+                if (++sends % 30 == 0) SendPing();
             }
             // 마지막 판정이 도착할 시간을 준다: 판정 유예(상한) + 왕복 지연 + 여유
             timer_.expires_after(milliseconds(rules_.rewindCapMs + 2 * options_.latencyMs + 400));
@@ -616,7 +683,17 @@ namespace
         const int index_;
         const std::uint32_t teamCode_;
         std::uint32_t playerId_ = 0;
-        Vec3 spawn_{}, position_{};
+        Vec3 spawn_{};
+        move::State sim_; // 내 예측 이동 상태
+        struct PendingInput
+        {
+            std::uint32_t sequence;
+            move::Input input;
+            move::State after; // 이 입력까지 적용한 예측 상태
+        };
+        std::deque<PendingInput> pending_; // 서버 확정을 아직 못 받은 입력
+        std::uint32_t inputSequence_ = 0;
+        std::uint16_t lastAckDodgeTick_ = 0;
         std::optional<Vec3> target_; // 같은 방 다른 플레이어의 마지막 위치(PvP 공격 봇이 노린다)
         ModeRules rules_{};
         std::int64_t serverOffsetMs_ = 0; // 서버 시각 - 내 시각
@@ -643,6 +720,7 @@ namespace
 int main(int argc, char** argv)
 {
     Options options;
+    std::string mapPath = "data/CombatLab.txt";
     for (int i = 1; i < argc; ++i)
     {
         const std::string_view key = argv[i];
@@ -653,6 +731,7 @@ int main(int argc, char** argv)
         if (key == "--dodge-test") { options.dodgeTest = true; continue; }
         if (key == "--dodge-cheat") { options.dodgeCheat = true; continue; }
         if (key == "--host") options.host = value;
+        else if (key == "--map") mapPath = value;
         else if (key == "--port") options.port = ParseNumber<std::uint16_t>(value, options.port);
         else if (key == "--bots") options.bots = ParseNumber<int>(value, options.bots);
         else if (key == "--team-size") options.teamSize = std::max(1, ParseNumber<int>(value, options.teamSize));
@@ -663,6 +742,16 @@ int main(int argc, char** argv)
         else if (key == "--rtt-lie") options.rttLie = ParseNumber<std::uint32_t>(value, 0);
         ++i;
     }
+
+    // 이동 예측에 서버와 같은 지형을 쓴다(저장소 루트에서 실행)
+    std::string mapError;
+    const auto map = game::CollisionMap::Load(mapPath, mapError);
+    if (!map)
+    {
+        std::println("지형을 읽지 못함: {} (--map 경로 확인)", mapError);
+        return EXIT_FAILURE;
+    }
+    options.world = &map->World();
 
     asio::io_context io;
     std::vector<std::shared_ptr<Bot>> bots;

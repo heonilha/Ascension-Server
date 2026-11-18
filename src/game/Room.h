@@ -2,7 +2,7 @@
 //
 // 스레드 규칙
 // - 방의 상태(members_, attacks_)는 방 전용 strand에서만 읽고 쓴다.
-// - Enter/Leave/Move/Dodge/Attack은 아무 스레드에서나 불러도 되고, 내부에서 strand로 넘긴다.
+// - Enter/Leave/Input/Dodge/Attack은 아무 스레드에서나 불러도 되고, 내부에서 strand로 넘긴다.
 // - 서로 다른 방은 서로 다른 strand라서 여러 스레드에서 동시에 돌아간다.
 #pragma once
 
@@ -45,7 +45,7 @@ namespace asc::game
 
         void Enter(std::shared_ptr<net::Session> session);
         void Leave(std::uint32_t playerId);
-        void Move(std::uint32_t playerId, const proto::C_Move& packet);
+        void Input(std::uint32_t playerId, const proto::C_Input& packet, std::vector<proto::InputCommand> commands);
         void Dodge(std::uint32_t playerId, const proto::C_Dodge& packet);
         void Attack(std::uint32_t playerId, const proto::C_Attack& packet);
         void ReportRtt(std::uint32_t playerId, std::uint32_t rttMs);
@@ -59,12 +59,9 @@ namespace asc::game
         // 서버 틱 주기. 이동 묶음을 이 주기로 보내고, 판정 유예가 끝난 공격을 확정한다.
         static constexpr auto kTickInterval = std::chrono::milliseconds(proto::kServerTickMs); // 20Hz
 
-        // 이동 검증 기준(토큰 버킷). 시간이 지나면 이동 가능 거리(budget)가 kMaxSpeed로 쌓이고,
-        // 이동할 때 그만큼 쓴다. 패킷 몇 개가 한꺼번에 도착해도 앞서 쌓인 거리로 통과한다.
-        // 달리기 450cm/s, 회피 최고 약 920cm/s에 여유를 둔 값이다.
-        static constexpr float kMaxSpeed = 1100.f;
-        static constexpr float kMaxBudget = kMaxSpeed * 0.5f; // 최대 0.5초 분량까지만 모아 둔다
-        static constexpr float kMoveSlack = 20.f;
+        // 이동 입력 처리량 제한(속도 조작 방지). 실제 시간 1초에 입력 60개(이동 틱 수)만큼 처리권이 쌓이고,
+        // 입력 하나마다 하나를 쓴다. 네트워크 몰림을 위해 0.5초 분량까지 모아 두고, 넘치는 입력은 버린다.
+        static constexpr double kMaxInputBacklog = move::kTickRate * 0.5;
         // 현재 데모 맵(개방형 폐허 정원)의 이동 범위. 클라이언트 AAscensionMode::ArenaHalfWidth/Depth와 같다.
         static constexpr float kArenaHalfWidth = 2800.f;
         static constexpr float kArenaHalfDepth = 2400.f;
@@ -111,10 +108,17 @@ namespace asc::game
             proto::Vec3 velocity{};
             float yaw = 0.f;
             proto::MoveState state = proto::MoveState::Idle;
-            Clock::time_point lastMoveTime{};
-            float moveBudget = kMaxBudget;
-            Clock::time_point lastCorrectionTime{};
             bool dirty = false;
+
+            // 서버 권한 이동
+            move::State sim;
+            std::uint32_t lastInputSequence = 0; // 마지막으로 처리(또는 버림)한 입력 번호
+            bool hasInput = false;
+            bool ackDirty = false;
+            double inputCredits = kMaxInputBacklog;
+            Clock::time_point creditTime{};
+            std::uint32_t droppedInputs = 0;
+            Clock::time_point lastDropLog{};
 
             float hp = kMaxHp;
             std::uint32_t rttMs = 0; // 0 = 아직 모름
@@ -139,7 +143,7 @@ namespace asc::game
 
         void DoEnter(std::shared_ptr<net::Session> session);
         void DoLeave(std::uint32_t playerId);
-        void DoMove(std::uint32_t playerId, const proto::C_Move& packet);
+        void DoInput(std::uint32_t playerId, const proto::C_Input& packet, const std::vector<proto::InputCommand>& commands);
         void DoDodge(std::uint32_t playerId, const proto::C_Dodge& packet);
         void DoAttack(std::uint32_t playerId, const proto::C_Attack& packet);
         asio::awaitable<void> TickLoop(std::shared_ptr<Room> self);

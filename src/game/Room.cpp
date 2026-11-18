@@ -59,9 +59,11 @@ namespace asc::game
         asio::post(strand_, [self = shared_from_this(), playerId] { self->DoLeave(playerId); });
     }
 
-    void Room::Move(std::uint32_t playerId, const C_Move& packet)
+    void Room::Input(std::uint32_t playerId, const C_Input& packet, std::vector<InputCommand> commands)
     {
-        asio::post(strand_, [self = shared_from_this(), playerId, packet] { self->DoMove(playerId, packet); });
+        asio::post(strand_, [self = shared_from_this(), playerId, packet, commands = std::move(commands)] {
+            self->DoInput(playerId, packet, commands);
+        });
     }
 
     void Room::Dodge(std::uint32_t playerId, const C_Dodge& packet)
@@ -98,7 +100,9 @@ namespace asc::game
         member.name = session->Name();
         member.slot = slot;
         member.position = SpawnPosition(mode_, slot);
-        member.lastMoveTime = Clock::now();
+        member.sim.x = member.position.x;
+        member.sim.y = member.position.y;
+        member.creditTime = Clock::now();
         member.history.push_back({ServerTimeMs(), member.position});
 
         // 새로 온 사람에게: 입장 결과 + 판정 규칙 + 이미 있던 사람들
@@ -138,52 +142,62 @@ namespace asc::game
         Broadcast(net::ToBuffer(left));
     }
 
-    void Room::DoMove(std::uint32_t playerId, const C_Move& packet)
+    void Room::DoInput(std::uint32_t playerId, const C_Input& packet, const std::vector<InputCommand>& commands)
     {
         Member* member = Find(playerId);
         if (!member) return;
 
+        // 처리권: 실제 시간만큼 쌓인다. 입력을 더 빨리 보내도(속도 조작) 초당 60틱 넘게 움직일 수 없다.
         const auto now = Clock::now();
-        const float elapsed = std::chrono::duration<float>(now - member->lastMoveTime).count();
-        member->lastMoveTime = now;
-        member->moveBudget = std::min(member->moveBudget + kMaxSpeed * elapsed, kMaxBudget);
+        member->inputCredits = std::min(kMaxInputBacklog,
+                                        member->inputCredits + std::chrono::duration<double>(now - member->creditTime).count() * move::kTickRate);
+        member->creditTime = now;
 
-        const Vec3& to = packet.position;
-        const bool finite = std::isfinite(to.x) && std::isfinite(to.y) && std::isfinite(to.z) && std::isfinite(packet.yaw);
-        const bool inside = std::abs(to.x) <= kArenaHalfWidth && std::abs(to.y) <= kArenaHalfDepth && to.z > -500.f && to.z < 3000.f;
-        const float distance = std::hypot(to.x - member->position.x, to.y - member->position.y);
-        const bool reachable = distance <= member->moveBudget + kMoveSlack;
-        // 지형: 장애물 안에 서거나 기둥·벽을 뚫고 지나가는 이동은 거부한다. 앞 검사를 통과했을 때만 계산한다.
-        const bool terrainOk = !finite || !inside || !reachable || !options_.map ||
-                               (!options_.map->Blocked(to, kTerrainRadius) &&
-                                !options_.map->SweepBlocked(member->position, to, kTerrainSweepRadius));
-
-        if (!finite || !inside || !reachable || !terrainOk)
+        static const move::World kEmptyWorld;
+        const move::World& world = options_.map ? options_.map->World() : kEmptyWorld;
+        std::uint32_t dropped = 0;
+        for (std::size_t i = 0; i < commands.size(); ++i)
         {
-            // 거부: 마지막으로 인정한 위치로 되돌리게 한다. 대기 중인 이동이 연달아 거부되므로 0.2초에 한 번만 보낸다.
-            if (now - member->lastCorrectionTime > std::chrono::milliseconds(200))
+            const std::uint32_t sequence = packet.firstSequence + static_cast<std::uint32_t>(i);
+            if (member->hasInput && sequence <= member->lastInputSequence) continue; // 이미 처리한 번호
+            member->hasInput = true;
+            member->lastInputSequence = sequence;
+            if (member->inputCredits < 1.0)
             {
-                member->lastCorrectionTime = now;
-                auto correction = Make<S_Correction>();
-                correction.sequence = packet.sequence;
-                correction.position = member->position;
-                member->session->Send(net::ToBuffer(correction));
-                Log("방 {} 이동 거부: {} (이동 {:.0f}cm, 허용 {:.0f}cm, 범위 {}, 지형 {})", teamCode_, member->name, distance, member->moveBudget,
-                    inside, terrainOk ? "통과" : "막힘");
+                ++dropped; // 버린 입력도 번호는 처리한 것으로 친다. 클라이언트는 확정 상태로 재조정된다
+                continue;
             }
-            return;
+            member->inputCredits -= 1.0;
+            const InputCommand& c = commands[i];
+            move::Step(member->sim, {c.moveX, c.moveY, c.flags, c.dodgeX, c.dodgeY}, world);
+        }
+        if (!options_.map)
+        {
+            // 지형을 끈 시험 실행: 맵 범위만 지킨다
+            member->sim.x = std::clamp(member->sim.x, -kArenaHalfWidth + move::kRadius, kArenaHalfWidth - move::kRadius);
+            member->sim.y = std::clamp(member->sim.y, -kArenaHalfDepth + move::kRadius, kArenaHalfDepth - move::kRadius);
         }
 
-        member->moveBudget = std::max(0.f, member->moveBudget - distance);
-        member->position = to;
-        member->velocity = packet.velocity;
-        member->yaw = packet.yaw;
+        if (dropped > 0)
+        {
+            member->droppedInputs += dropped;
+            if (now - member->lastDropLog > std::chrono::seconds(1))
+            {
+                member->lastDropLog = now;
+                Log("방 {} 입력 초과로 버림: {} (누적 {}개)", teamCode_, member->name, member->droppedInputs);
+            }
+        }
+
+        member->position = {member->sim.x, member->sim.y, move::kGroundZ};
+        member->velocity = {member->sim.vx, member->sim.vy, 0.f};
+        if (std::isfinite(packet.yaw)) member->yaw = packet.yaw;
         member->state = packet.state;
         member->dirty = true;
+        member->ackDirty = true;
 
         // 판정 때 "명중 시각에 그 플레이어가 있던 곳"을 찾기 위해 도착 시각과 함께 남긴다.
         const std::uint32_t nowMs = ServerTimeMs();
-        member->history.push_back({nowMs, to});
+        member->history.push_back({nowMs, member->position});
         while (member->history.size() > 1 && nowMs - member->history.front().serverMs > kHistoryMs) member->history.pop_front();
     }
 
@@ -354,6 +368,17 @@ namespace asc::game
 
             UpdateCombat(ServerTimeMs());
 
+            // 입력을 보낸 본인에게 마지막 처리 번호와 확정 상태를 알린다(클라이언트 재조정 기준).
+            for (Member& member : members_)
+            {
+                if (!member.ackDirty) continue;
+                member.ackDirty = false;
+                auto ack = Make<S_MoveAck>();
+                ack.sequence = member.lastInputSequence;
+                ack.state = move::ToProto(member.sim);
+                member.session->Send(net::ToBuffer(ack));
+            }
+
             std::vector<MoveEntry> entries;
             for (Member& member : members_)
             {
@@ -399,10 +424,10 @@ namespace asc::game
         {
             // 맵 중앙을 둘러싼 반지름 6m 원 위에 고르게 세운다.
             const float angle = 2.f * std::numbers::pi_v<float> * static_cast<float>(slot) / static_cast<float>(kMaxPvpPlayers);
-            return {600.f * std::cos(angle), 600.f * std::sin(angle), 100.f};
+            return {600.f * std::cos(angle), 600.f * std::sin(angle), move::kGroundZ};
         }
         // 클라이언트 데모의 시작 위치(-750, 0) 근처에 1.5m 간격으로 나란히 세운다.
-        return {-750.f, -150.f + 150.f * static_cast<float>(slot), 100.f};
+        return {-750.f, -150.f + 150.f * static_cast<float>(slot), move::kGroundZ};
     }
 
     PlayerInfo Room::ToInfo(const Member& member)
