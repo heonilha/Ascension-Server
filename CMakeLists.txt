@@ -34,7 +34,8 @@ add_library(ascension_core STATIC
     src/net/Session.cpp
     src/net/Server.cpp
     src/game/Room.cpp
-    src/game/RoomManager.cpp)
+    src/game/RoomManager.cpp
+    src/game/CollisionMap.cpp)
 target_include_directories(ascension_core PUBLIC src)
 target_link_libraries(ascension_core PUBLIC asio ascension_protocol)
 target_compile_options(ascension_core PUBLIC -Wall -Wextra -Wpedantic)
@@ -45,3 +46,7 @@ target_link_libraries(ascension_server PRIVATE ascension_core)
 # ---- 도구: 봇 클라이언트 ----
 add_executable(ascension_bot tools/bot/main.cpp)
 target_link_libraries(ascension_bot PRIVATE ascension_core)
+
+# ---- 시험: 충돌 지형 단위 시험 (저장소 루트에서 실행: ./build/debug/ascension_terrain_test) ----
+add_executable(ascension_terrain_test tools/tests/terrain_test.cpp)
+target_link_libraries(ascension_terrain_test PRIVATE ascension_core)

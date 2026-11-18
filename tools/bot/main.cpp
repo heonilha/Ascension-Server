@@ -1,7 +1,7 @@
 // 헤드리스 봇 클라이언트. 서버 동작 확인과 이후 부하 테스트에 쓴다.
 //
 // ascension_bot [--host 127.0.0.1] [--port 7777] [--bots 6] [--team-size 3] [--seconds 5]
-//               [--team-base 1000] [--mode pve|pvp] [--cheat] [--burst]
+//               [--team-base 1000] [--mode pve|pvp] [--cheat] [--burst] [--wall]
 //               [--latency 0] [--dodge-test] [--dodge-cheat] [--rtt-lie 0]
 //
 // 봇 i는 teamCode = team-base + i / team-size 방에 들어가 시작 위치 주변을 원을 그리며 돈다.
@@ -10,6 +10,7 @@
 //   - 정상 이동에 S_Correction이 오지 않았는가
 //   - 정원을 넘긴 봇은 RoomFull을 받았는가
 //   - --cheat: 0번 봇이 순간이동을 시도하면 S_Correction을 받는가
+//   - --wall: PvE 0번 봇이 남쪽 부서진 기둥(100,-650)을 뚫고 걸어가면 S_Correction을 받는가(서버 충돌 지형)
 //
 // 회피 판정 시험(--dodge-test)
 //   봇은 제자리에 서서, 자기를 노린 공격(S_AttackStart)마다 정해 둔 시각에 회피를 누른다.
@@ -58,6 +59,7 @@ namespace
         std::uint32_t teamBase = 1000;
         RoomMode mode = RoomMode::PvE;
         bool cheat = false;
+        bool wall = false; // 0번 봇이 기둥을 뚫고 지나가려 한다
         bool burst = false; // 회피 크기 이동 3개를 한꺼번에 보낸다(네트워크 몰림 재현)
         int latencyMs = 0;
         bool dodgeTest = false;
@@ -231,8 +233,8 @@ namespace
                 if (!stats_.entered) ok = false, problems += " 입장 실패";
                 if (static_cast<int>(stats_.movedOthers.size()) != expectedOthers)
                     ok = false, problems += std::format(" 다른 봇 이동 {}/{}", stats_.movedOthers.size(), expectedOthers);
-                const bool cheater = options_.cheat && index_ == 0;
-                if (cheater && stats_.corrections == 0) ok = false, problems += " 순간이동이 거부되지 않음";
+                const bool cheater = (options_.cheat || options_.wall) && index_ == 0;
+                if (cheater && stats_.corrections == 0) ok = false, problems += options_.wall ? " 기둥 통과가 거부되지 않음" : " 순간이동이 거부되지 않음";
                 if (!cheater && stats_.corrections > 0) ok = false, problems += std::format(" 정상 이동 거부 {}회", stats_.corrections);
                 if (options_.dodgeTest) ok &= ReportDodges(problems);
             }
@@ -552,6 +554,14 @@ namespace
                 }
                 // 방어 봇은 제자리에 선다(무적 판정만 보도록 범위 밖으로 나가지 않는다).
 
+                // --wall: 시작 위치에서 남쪽 부서진 기둥 중심을 지나 그 너머까지 300cm/s로 곧장 걷는다.
+                // 막히면 서버가 되돌린 위치에서 다시 같은 방향으로 민다.
+                if (options_.wall && index_ == 0)
+                {
+                    const float dx = 100.f - spawn_.x, dy = -650.f - spawn_.y, length = std::hypot(dx, dy);
+                    position_ = {previous.x + dx / length * 300.f * 0.066f, previous.y + dy / length * 300.f * 0.066f, spawn_.z};
+                }
+
                 // --cheat: 2초쯤 한 번 40m 순간이동을 시도한다
                 if (options_.cheat && index_ == 0 && !cheated_ && t > 2.f)
                 {
@@ -638,6 +648,7 @@ int main(int argc, char** argv)
         const std::string_view key = argv[i];
         const std::string_view value = i + 1 < argc ? argv[i + 1] : "";
         if (key == "--cheat") { options.cheat = true; continue; }
+        if (key == "--wall") { options.wall = true; continue; }
         if (key == "--burst") { options.burst = true; continue; }
         if (key == "--dodge-test") { options.dodgeTest = true; continue; }
         if (key == "--dodge-cheat") { options.dodgeCheat = true; continue; }
