@@ -1,11 +1,11 @@
 # Run every automated check: unit tests (terrain, monsters), Rust port checks + bot scenarios against two private test servers.
-# Rust port: the C++ build writes a movement record, which must equal the committed one; then "cargo test" checks that
-# the Rust crates (rust\) reproduce it bit for bit through FFI. Prints a SKIP line if cargo is not installed.
+# Rust port: the C++ build writes golden records (movement; collision map + monsters), which must equal the committed
+# ones; then "cargo test" checks that the Rust crates (rust\) reproduce them bit for bit. SKIP line if cargo is missing.
 # Server A (-Port): PvE rooms are empty except for a timed slam pattern, so dodge timing checks stay exact.
 # Server B (-Port + 1): PvE rooms have server monsters (spawning, chasing, attacking).
 #   .\Scripts\Test.ps1               # builds first, prints one PASS/FAIL line per scenario (about 50 s)
 #   .\Scripts\Test.ps1 -NoBuild
-#   .\Scripts\Test.ps1 -UpdateGolden # after changing protocol\AscensionMovement.h on purpose: rewrite the committed record
+#   .\Scripts\Test.ps1 -UpdateGolden # after changing movement or game rules on purpose: rewrite the committed records
 # Logs: build\windows\test-logs\<scenario>.log and server.log. Exit code 1 if anything failed.
 # Scenarios run in parallel, each in its own rooms (distinct --team-base).
 param(
@@ -68,18 +68,25 @@ try {
     if (-not $ok) { $failed++ }
     Write-Host ('{0,-18} {1}' -f 'monster_test', $(if ($ok) { 'PASS' } else { 'FAIL' }))
 
-    $goldenFile = Join-Path $root 'rust\crates\movement\tests\golden\movement_v4.txt'
-    $goldenNow = Join-Path $logs 'movement_golden.txt'
-    & (Join-Path $bin 'ascension_movement_golden.exe') 'data\CombatLab.txt' $goldenNow
-    $ok = $LASTEXITCODE -eq 0
-    if ($ok -and $UpdateGolden) { Copy-Item $goldenNow $goldenFile -Force }
-    $ok = $ok -and (((Get-Content $goldenNow -Raw) -replace "`r`n", "`n") -ceq ((Get-Content $goldenFile -Raw) -replace "`r`n", "`n"))
-    if (-not $ok) { $failed++ }
-    Write-Host ('{0,-18} {1}' -f 'movement_golden', $(if ($ok) { 'PASS' } else { 'FAIL' }))
+    # Golden records: what the C++ build computes now must equal the committed record the Rust tests compare against.
+    $goldens = [ordered]@{
+        'movement_golden' = 'rust\crates\movement\tests\golden\movement_v4.txt' # shared movement header (FFI)
+        'game_golden'     = 'rust\crates\game\tests\golden\game_v4.txt'         # collision map + monsters (ported to Rust)
+    }
+    foreach ($name in $goldens.Keys) {
+        $goldenFile = Join-Path $root $goldens[$name]
+        $goldenNow = Join-Path $logs "$name.txt"
+        & (Join-Path $bin "ascension_$name.exe") 'data\CombatLab.txt' $goldenNow
+        $ok = $LASTEXITCODE -eq 0
+        if ($ok -and $UpdateGolden) { Copy-Item $goldenNow $goldenFile -Force }
+        $ok = $ok -and (((Get-Content $goldenNow -Raw) -replace "`r`n", "`n") -ceq ((Get-Content $goldenFile -Raw) -replace "`r`n", "`n"))
+        if (-not $ok) { $failed++ }
+        Write-Host ('{0,-18} {1}' -f $name, $(if ($ok) { 'PASS' } else { 'FAIL' }))
+    }
 
-    $extraChecks = 3
+    $extraChecks = 2 + $goldens.Count
     if (Get-Command cargo -ErrorAction SilentlyContinue) {
-        $extraChecks = 4
+        $extraChecks++
         $manifest = Join-Path $root 'rust\Cargo.toml'
         $rustLog = Join-Path $logs 'rust_tests.log'
         cmd /c "cargo test --workspace --manifest-path `"$manifest`" > `"$rustLog`" 2>&1"
