@@ -1,83 +1,60 @@
 # Ascension-Server
 
-「각성과 탐욕의 탑」 전용 게임 서버. 클라이언트 저장소(Ascension-Team)와는 **`protocol/` 폴더의 파일만** 공유한다.
+배틀로얄 핵앤슬래시 「DungeonEscape2」(기획: 클라이언트 저장소 `Docs/11.26기획안.md`) 전용 게임 서버. 클라이언트 저장소(Ascension-Team)와는 **`protocol/` 폴더의 파일만** 공유한다.
 
-**Windows에서 바로 빌드하고 실행한다.** Visual Studio만 있으면 되고 WSL은 필요 없다 → [빌드와 실행](#빌드와-실행)
+**Windows에서 바로 빌드하고 실행한다.** Visual Studio(C++ 도구)와 Rust만 있으면 되고 WSL은 필요 없다 → [빌드와 실행](#빌드와-실행)
 
-- 언어/도구: C++23, MSVC(Visual Studio 2022 이상) + CMake. Linux + GCC 14 이상에서도 빌드된다(ThreadSanitizer 검사용, 선택)
-- 네트워크: standalone asio 1.38 + C++20 코루틴. Windows에서는 IOCP 위에서 돈다(Linux는 epoll)
-- 현재 단계: **P1 진행 중** — 서버 권한 이동(입력 전송 + 공유 이동 코드 + 클라이언트 예측·재조정), 충돌 지형, 서버 회피 판정과 지연 보정, **서버 몬스터(추적·공격·넉백·증원)와 검기 판정**. PvE 방(최대 3명)과 PvP 방(최대 16명)을 모드별 규칙으로 나눈다.
+- 서버: **Rust**(tokio). `rust/` 워크스페이스. 이동 계산은 클라이언트와 같은 C++ 헤더(`protocol/AscensionMovement.h`)를 FFI로 부른다
+- 시험 도구: C++23(MSVC + CMake). 헤드리스 봇(`tools/bot`)과 기준 기록 도구가 C++ 원본 게임 코드(`src/game`)로 Rust 계산을 검증한다
+- 현재 단계: **배틀로얄 매치 방**(최대 4팀 × 3명) — 팀 입장과 아군 공격 차단, 1~4라운드와 자기장 축소·자기장 밖 피해, 라운드별 부활 대기와 4라운드 탈락, 최후의 1팀 판정. 그 위에 서버 권한 이동, 충돌 지형, 서버 회피 판정과 지연 보정, 서버 몬스터와 검기 판정이 돈다. 개발 시험용 **연습 방**(최대 3명)은 회피·몬스터 판정 시험에만 쓴다
 
 ## 폴더 구조
 
 ```
 protocol/AscensionProtocol.h   패킷 정의 원본 (C++20 범위만 사용, 클라이언트가 복사해 감)
 protocol/AscensionMovement.h   이동 계산 원본 (서버·봇·클라이언트가 같은 코드로 이동을 계산, 클라이언트가 복사해 감)
-src/net/      Session(연결 하나), Server(accept), Packet(버퍼 도우미)
-src/game/     Room(층 인스턴스 하나), RoomManager((모드, teamCode) → Room), CollisionMap(충돌 지형), CombatRules(모드별 판정 규칙),
-              Monsters(몬스터 AI·증원·검기 시뮬레이션. 네트워크를 모르는 순수 계산)
-src/core/     로그(전용 스레드가 출력), 서버 시계, 운영체제별 준비(Platform.h)
+rust/crates/protocol  패킷 구조체(헤더와 같은 바이트 배치, 크기를 컴파일 시간에 확인)
+rust/crates/movement  충돌 파일 읽기·1틱 이동(C++ 헤더를 FFI로)
+rust/crates/game      네트워크를 모르는 게임 계산: 충돌 지형, 모드별 판정 규칙, 몬스터·검기, 매치 시간표(match_rules), 시작 위치
+rust/crates/server    실행 파일 ascension-server: 세션, 방(방 하나 = 태스크 하나, 20Hz 틱), 방 대응표
+src/game/     C++ 원본 충돌 지형·몬스터(봇·기준 기록 도구용), RoomLayout(봇·지형 시험용 상수와 시작 위치)
+src/net/      Packet(봇의 버퍼 도우미)
+src/core/     로그·시계·운영체제별 준비(봇·시험용)
 tools/bot/    헤드리스 봇 클라이언트 (동작 확인 + 이후 부하 테스트)
-tools/tests/  단위 시험 (충돌 지형, 몬스터·검기)
+tools/tests/  C++ 단위 시험(충돌 지형, 몬스터·검기)과 기준 기록 도구
 data/         충돌 지형 (클라이언트에서 내보낸 파일, 손으로 고치지 않음)
 Scripts/      Windows용 빌드·실행·시험 스크립트
-rust/         Rust 서버 워크스페이스 (전환 진행 중, 아래 "Rust 전환" 참고)
 ```
 
-## Rust 전환 (진행 중)
+## Rust 서버
 
-서버를 Rust로 옮기는 중이다. **Rust 서버가 완성돼 C++ 서버와 같은 봇 시나리오를 모두 통과한다.** 기본으로 실행하는 서버는 아직 C++ 서버(`src/`)이고, 언리얼 클라이언트로 Rust 서버를 확인한 뒤 바꾼다.
+C++ 서버를 Rust로 옮겼고(2026-11-16, 봇 시나리오 27개 동일 통과), 2026-11-27 배틀로얄 매치를 넣으면서 **C++ 서버 본체(`src/net` Session·Server, `src/game` Room·RoomManager·CombatRules, `src/main.cpp`)를 지웠다.** 이력은 Git에 남아 있다.
 
-```powershell
-.\Scripts\RunServer.ps1 -Rust    # Rust 서버 실행(포트·옵션은 C++ 서버와 같다)
-.\Scripts\Test.ps1 -Rust         # 봇 시나리오 27개를 Rust 서버에 돌린다
-```
+- **이동 계산은 옮기지 않았다.** 언리얼 클라이언트가 `protocol/AscensionMovement.h`로 미리 움직이므로, Rust 서버도 같은 C++ 헤더를 FFI로 부른다(`rust/crates/movement`). 원본이 하나라서 "같은 입력이면 같은 위치"가 그대로 유지된다.
+- **패킷은 Rust에 한 번 더 정의한다**(`rust/crates/protocol`). 원본은 여전히 `protocol/AscensionProtocol.h`이고, 헤더의 `static_assert` 크기를 Rust에서도 컴파일 시간에 확인한다. 헤더를 바꾸면 `rust/crates/protocol/src/lib.rs`도 같이 바꾼다.
+- **방의 상태는 방 태스크 하나만 가진다.** 세션은 채널로 명령(입장·입력·회피·공격…)을 보내고, 방 태스크가 받은 순서대로 처리하다가 50ms마다 틱을 돈다. 방 안에는 락이 없고 서로 다른 방은 여러 스레드에서 동시에 돈다. 락은 `RoomManager`의 정원 확인 한 곳뿐이라, 두 명이 동시에 마지막 자리(방 또는 팀)에 들어와도 한 명만 성공한다. 세션 송신 대기열이 1024개를 넘으면 끊고, 방 명령 대기열(1024개)이 차면 보내는 세션의 읽기가 멈춘다.
+- **기준 기록**: C++ 원본(`src/game`)이 만든 기록과 Rust 계산을 비트 단위로 비교한다. `ascension_movement_golden`(무작위 걷기 8번 × 3600틱, 지형 거리 격자) → `rust/crates/movement/tests/golden/movement_v5.txt`, `ascension_game_golden`(충돌 격자·경로와 시야 4,000쌍·몬스터 60초) → `rust/crates/game/tests/golden/game_v5.txt`. 이동 헤더나 게임 규칙을 일부러 고쳤다면 C++ 쪽도 같이 고치고 `.\Scripts\Test.ps1 -UpdateGolden`으로 기록을 다시 만든다. 증원 자리는 비교하지 않는다(C++ 표준 분포 구현이 컴파일러마다 달라 Rust는 자체 난수를 쓰고 규칙만 시험한다).
 
-- **이동 계산은 옮기지 않는다.** 언리얼 클라이언트가 `protocol/AscensionMovement.h`로 미리 움직이므로, Rust 서버도 같은 C++ 헤더를 FFI로 부른다(`rust/crates/movement`). 원본이 하나라서 "같은 입력이면 같은 위치"가 그대로 유지된다. Rust로 다시 쓰면 `sin` 같은 함수의 마지막 비트가 달라질 수 있다.
-- **패킷은 Rust에 한 번 더 정의한다**(`rust/crates/protocol`). 원본은 여전히 `protocol/AscensionProtocol.h`이고, 헤더의 `static_assert` 크기 30개를 Rust에서도 컴파일 시간에 확인한다. 헤더를 바꾸면 `rust/crates/protocol/src/lib.rs`도 같이 바꾼다.
+## 매치 (배틀로얄, 프로토콜 v5)
 
-| 크레이트 | 내용 |
+`C_EnterRoom{teamCode, mode=Match, team}`: **teamCode는 판 번호**, **team은 소속 팀(1~4)**이다. 같은 판 번호를 보낸 사람끼리 한 방(최대 12명)에 들어가고, 팀마다 3명까지다(넘으면 `TeamFull`, 팀 번호가 틀리면 `InvalidTeam`). 팀 1~4는 맵 대각선 네 방향(반지름 17m)의 팀 기지에서 시작한다. **같은 팀끼리는 공격이 맞지 않는다.**
+
+| 단계 | 내용 |
 |---|---|
-| `asc-protocol` | 패킷 구조체(`#[repr(C, packed)]`), 열거형, `make`/`read`/이름 복사 |
-| `asc-movement` | `World`(충돌 파일 읽기, 장애물 목록, 거리 계산), `step`(1틱 진행). 계산은 `native/movement_shim.cpp`를 거쳐 C++ 헤더가 한다 |
-| `asc-game` | 네트워크를 모르는 게임 계산. `collision`(충돌 지형), `combat_rules`(모드별 규칙·지연 보정), `monsters`(몬스터 AI·증원·검기), `room_layout`(시작 위치·맵 범위). C++ `src/game`의 CollisionMap·CombatRules·Monsters를 옮긴 것 |
+| 대기 | 2팀 이상(`--match-start-teams`) 모이면 카운트다운 10초. 그 전에 팀이 빠지면 다시 대기 |
+| 1라운드 | 15분. 시작할 때 모두 살려 팀 기지로 옮긴다. 자기장 반지름 37m(맵 전체), 밖 피해 초당 최대 체력 1% |
+| 축소 | 라운드 사이 1분 동안 반지름이 다음 값으로 줄어든다(37 → 24 → 15 → 8m) |
+| 2·3라운드 | 10분·5분, 피해 2%·4% |
+| 4라운드 | 3분 동안 8m → 0(맵 중앙 한 점), 피해 8%. 4라운드가 끝나도 반지름 0으로 계속 |
+| 종료 | 최후의 1팀. 결과 15초 표시 뒤 모두 살려 다시 대기 |
 
-| `asc-server` | 실행 파일 `ascension-server`. `session`(연결 하나: 읽기·쓰기 태스크), `room`(방 하나 = 태스크 하나, 20Hz 틱), `room_manager`(정원 확인), `log`(전용 스레드 출력). C++ `src/net`·`Room`·`RoomManager`를 tokio로 옮긴 것 |
-
-**Rust 서버의 태스크 구조**는 C++ 서버의 strand 구조와 같은 원리다. 방의 상태는 방 태스크 하나만 가지고, 세션은 채널로 명령(입장·입력·회피·공격…)을 보낸다. 방 태스크는 받은 순서대로 처리하다가 50ms마다 틱을 돈다. 그래서 방 안에는 락이 없고, 서로 다른 방은 여러 스레드에서 동시에 돌아간다. 락은 `RoomManager`의 정원 확인 한 곳뿐이다. 세션의 송신 대기열이 1024개를 넘으면 끊는 것도 같다. 달라진 점은 방의 명령 대기열에 상한(1024개)이 있어, 가득 차면 보내는 세션의 읽기가 멈춘다는 것이다(입력을 쏟아붓는 클라이언트가 서버 메모리를 늘리지 못한다).
-
-`asc-game`은 Rust로 다시 쓴 코드라서 C++ 원본과 결과가 같은지도 기준 기록으로 확인한다. `ascension_game_golden`이 충돌 격자(6,000여 점)·경로와 시야 4,000쌍·몬스터 시뮬레이션 60초(증원을 끄고 자리를 정해 둔 시나리오)를 계산하고, Rust 시험이 같은 입력으로 비트 단위까지 같은 결과를 내는지 본다(`rust/crates/game/tests/golden.rs`). 증원 자리만은 비교하지 않는다: C++은 `std::mt19937`과 표준 분포를 쓰는데 분포 구현이 컴파일러마다 달라, Rust는 자체 난수(`rng.rs`)를 쓰고 규칙(거리·간격·장애물·상한)을 시험한다.
-
-**이동 결과가 같은지 확인하는 방법**: `ascension_movement_golden`(CMake로 C++ 서버·봇과 같은 설정으로 빌드)이 무작위 걷기 8번 × 3600틱과 지형 거리 격자를 계산해 기록을 만든다. 저장해 둔 기록(`rust/crates/movement/tests/golden/movement_v4.txt`)과 Rust 시험(`tests/golden.rs`)이 FFI로 계산한 결과를 비트 단위로 비교한다. `Test.ps1`이 두 가지를 모두 돌린다. 이동 헤더를 일부러 고쳤다면 `.\Scripts\Test.ps1 -UpdateGolden`으로 기록을 다시 만든다.
-
-```powershell
-cd rust
-cargo test --workspace     # 처음에는 bytemuck·cc를 받아 온다. C++ 연결부를 컴파일하므로 Visual Studio가 필요하다
-```
-
-전환 순서(완료 기준: 기존 C++ 봇과 `Test.ps1` 시나리오가 Rust 서버에서 전부 PASS):
-
-1. ~~프로토콜 크레이트, 이동 FFI, 기준 기록 비교~~ (완료)
-2. ~~충돌 지형(`CollisionMap`)·전투 규칙(`CombatRules`)·몬스터(`Monsters`)와 단위 시험~~ (완료)
-3. ~~네트워크·방(`Session`, `Room`, `RoomManager`): tokio, 방 하나 = 태스크 하나~~ (완료)
-4. ~~`Test.ps1`을 Rust 서버로 돌려 전부 PASS~~ (완료) → 언리얼 클라이언트로 Rust 서버 확인 → 기본 서버를 Rust로 바꾸고 C++ 서버 소스 제거. 봇·기준 기록 도구는 C++ 서버 코드를 쓰므로, 제거 전에 봇을 어떻게 둘지 정한다
-
-전환이 끝날 때까지 프로토콜은 v4로 고정하고, 새 기능(수문장·성장 등)은 두 서버에 동시에 넣지 않는다.
-
-## 스레드 구조
-
-```
-io_context  ←  스레드 N개가 run()
- ├─ Session strand (연결마다 하나)   읽기 → 패킷 해석 → Room에 post / 쓰기 대기열
- └─ Room strand    (층마다 하나)     입장·퇴장·입력 처리 → 20Hz 틱: 몬스터·검기 진행, 공격 판정, 상태 브로드캐스트
-로그 스레드 (하나)                   대기열에 쌓인 줄을 출력. 게임 틱은 출력을 기다리지 않는다
-```
-
-- 한 strand 안의 작업은 순서대로 하나씩 실행되므로 **Session·Room 내부 상태에는 락이 없다.**
-- 서로 다른 Room은 다른 strand라서 여러 스레드에서 동시에 돌아간다. 이후 층 인스턴스 소유권·태스크 그래프 구조를 이 단위 위에 올린다.
-- 락은 `RoomManager` 한 곳뿐이다. 정원 확인을 뮤텍스 안에서 끝내서, 두 명이 동시에 마지막 자리에 들어와도 한 명만 성공한다.
-- 브로드캐스트 버퍼는 `shared_ptr`로 공유해 받는 사람 수만큼 복사하지 않는다.
-- 송신 대기열이 1024개를 넘으면(받지 못하는 클라이언트) 연결을 끊는다.
+- **사망·부활**: 1·2·3라운드(각 라운드 뒤 축소 포함)에 죽으면 10·20·30초 뒤 서버가 스스로 부활시킨다(`C_Respawn`은 무시). 시작 전 사망은 3초. **4라운드에 죽으면 탈락**이다. 부활 위치는 자기장 안쪽(반지름 × 0.75 − 1m), 장애물 밖에서 가장 가까운 적과 가장 먼 곳(팀 기지 + 무작위 후보 24곳 중). 부활 직후 2초 보호.
+- **승패**: 2팀 이상으로 시작한 판은 탈락하지 않은 팀이 1팀 이하가 되면 끝난다(나간 사람은 탈락으로 친다). 남은 팀이 없으면 마지막에 죽은 사람의 팀이 이기고, 같은 자기장 피해 틱에 여러 팀이 함께 전멸하면 무승부(승리 팀 0)다. 1팀으로 시작한 판(혼자 시험)은 그 팀이 탈락하면 끝난다.
+- **자기장 피해**는 1초마다 한 번 `S_HitResult{attackId 0}`으로 보낸다. 사망은 `S_PlayerDied{원인, 죽인 사람, 부활 시각(0 = 탈락)}`.
+- **`S_MatchState`**: 단계·라운드·단계 시작/끝 시각·자기장 중심과 반지름(시작 → 끝, 그 사이 일정하게 줄어듦)·피해율·남은 팀 수·승리 팀·지금 죽으면 부활하는지. 입장할 때, 단계나 남은 팀 수가 바뀔 때, 그리고 2초마다 보낸다.
+- **몬스터**: 매치에도 서버 몬스터가 돈다(아래 "몬스터와 검기"). 검기(`Wave`·`HeavyWave`)는 몬스터를, 근접 공격(`Slash`)은 다른 팀 플레이어를 친다.
+- **시간 배율**: `--match-time-scale 0.1`이면 모든 시간(라운드·축소·카운트다운·부활 대기·결과 표시)이 0.1배다(한 판 약 3.6분). 시간표는 `rust/crates/game/src/match_rules.rs`.
+- **한계**: 경험치·레벨·스킬 포인트·스탯, 검/활 스킬 서버 판정, 특성, 균열, 황금 고블린은 아직 없다. 플레이어 사이 공격은 기존 시험용 근접 공격(20 피해)뿐이고, 검기는 플레이어를 맞히지 않는다. 판 도중 들어온 사람은 바로 살아 있는 상태로 참가한다.
 
 ## 프로토콜 규칙
 
@@ -89,20 +66,22 @@ io_context  ←  스레드 N개가 run()
 | 패킷 | 방향 | 내용 |
 |---|---|---|
 | `C_Login` / `S_Login` | C→S / S→C | 버전·이름 → playerId |
-| `C_EnterRoom` / `S_EnterRoom` | | 모드(PvE/PvP)·teamCode → 결과, 시작 위치, 정원, 모드 규칙, 서버 시각, 기존 멤버 목록 |
-| `S_PlayerJoined` / `S_PlayerLeft` | S→C | 같은 층 멤버 변화 |
+| `C_EnterRoom` / `S_EnterRoom` | | 모드(매치/연습)·teamCode(판 번호)·team(1~4) → 결과, 시작 위치, 정원, 모드 규칙, 서버 시각, 기존 멤버 목록(팀 포함) |
+| `S_PlayerJoined` / `S_PlayerLeft` | S→C | 같은 방 멤버 변화(팀 포함) |
 | `C_Input` | C→S | 60Hz 틱 입력(이동 방향·회피)을 30Hz로 묶어서. 바라보는 방향·애니메이션 상태(연출용) |
 | `S_MoveAck` | S→C | 마지막으로 처리한 입력 번호와 서버 이동 상태(본인에게만, 20Hz) |
 | `S_MoveBatch` | S→C | 20Hz, 바뀐 멤버만 묶어서 |
 | `C_Ping` / `S_Pong` | | 왕복 지연 측정·서버 시계 추정. `C_Ping`에 직전 왕복 시간을 실어 보낸다 |
 | `C_Dodge` | C→S | 회피 시작: 누른 시각(서버 시계 추정값) |
-| `C_Attack` | C→S | PvP 근접 공격 / PvE 검기(일반·충전): 누른 시각·방향·충전량 |
+| `C_Attack` | C→S | 근접 공격(매치: 다른 팀 플레이어) / 검기(일반·충전, 몬스터): 누른 시각·방향·충전량 |
 | `S_AttackStart` / `S_AttackCancel` | S→C | 서버가 정한 공격: 시작·명중 시각, 범위(원·부채꼴·돌진 길), 몬스터 번호 / 예고 취소 |
-| `S_HitResult` | S→C | 범위 안 플레이어별 판정(피격/회피), 피해, 인정한 회피 시각·되감기 |
+| `S_HitResult` | S→C | 범위 안 플레이어별 판정(피격/회피), 피해, 인정한 회피 시각·되감기. attackId 0 = 자기장 피해 |
 | `S_MonsterBatch` | S→C | 20Hz, 살아 있는 몬스터 전부(마리당 11바이트: 위치 cm 정수·방향 1바이트·상태·HP) |
 | `S_MonsterHit` | S→C | 몬스터 피해·남은 HP(0이면 사망) |
 | `S_WaveSpawn` / `S_WaveEnd` | S→C | 검기 발사 / 수명 전 종료(관통 소진·벽) |
-| `C_Respawn` / `S_Respawn` | | 사망 뒤 부활 요청 / 시작 위치·HP |
+| `C_Respawn` / `S_Respawn` | | 연습 방: 사망 뒤 부활 요청 / 부활 위치·HP(매치는 서버가 부활 대기 뒤 보낸다) |
+| `S_MatchState` | S→C | 매치 단계·라운드·자기장·남은 팀·승리 팀(위 "매치") |
+| `S_PlayerDied` | S→C | 사망: 원인(플레이어·몬스터·자기장), 죽인 사람, 부활 시각(0 = 탈락) |
 
 ### 충돌 지형 (P1)
 
@@ -115,9 +94,9 @@ io_context  ←  스레드 N개가 run()
 - **파일 위치**: 현재 폴더의 `data/`에서 찾고, 없으면 실행 파일 위쪽 폴더로 올라가며 찾는다(스크립트로 실행하든 Visual Studio에서 F5로 실행하든 된다). 다른 파일은 `--map <경로>`, 끄려면 `--map none`. 파일을 못 읽으면 서버가 시작하지 않는다.
 - 다음 단계(서버 이동 계산·몬스터 길찾기)도 이 데이터를 쓴다.
 
-### 몬스터와 검기 (P1, 프로토콜 v4)
+### 몬스터와 검기
 
-PvE 방의 몬스터는 서버가 움직인다(`src/game/Monsters.*`). 1인 데모의 규칙을 그대로 옮겼다.
+매치와 연습 방의 몬스터는 서버가 움직인다(`rust/crates/game/src/monsters.rs`, C++ 원본 `src/game/Monsters.*`). 1인 데모의 규칙을 그대로 옮겼다.
 
 | 종류 | HP | 공격 |
 |---|---|---|
@@ -127,17 +106,17 @@ PvE 방의 몬스터는 서버가 움직인다(`src/game/Monsters.*`). 1인 데�
 
 - **추적**: 가장 가까운 살아 있는 플레이어에게 220cm/s. 정면 110cm가 막히면 ±45·±90·±135도 순으로 돌아간다. 몬스터끼리는 겹치지 않게 밀어낸다.
 - **피격**: 0.16초 경직(지휘관 0.08초) 동안 넉백(피해 × 1.5cm, 25~65cm. 지휘관 15cm). 지형에 막히면 멈춘다. 0.35초 안에는 다시 경직되지 않는다. 검병·폭주 망령은 예고가 끊기고(`S_AttackCancel`), 지휘관은 경직 시간만큼 늦춰 다시 알린다.
-- **증원**: 2.5초(점점 1.5초까지)마다 4~8마리 + 1초마다 목표 수(12 → 28)까지 보충 + 60초마다 지휘관. **층당 최대 48마리.** 플레이어 한 명의 둘레 6.5~12.5m, 장애물 밖, 다른 플레이어에게서 4m 이상, 다른 몬스터에게서 1.6m 이상인 자리에 생긴다.
+- **증원**: 2.5초(점점 1.5초까지)마다 4~8마리 + 1초마다 목표 수(12 → 28)까지 보충 + 60초마다 지휘관. **방당 최대 48마리.** 플레이어 한 명의 둘레 6.5~12.5m, 장애물 밖, 다른 플레이어에게서 4m 이상, 다른 몬스터에게서 1.6m 이상인 자리에 생긴다.
 - **플레이어를 향한 공격**은 예고 시작 때 명중 시각을 정해 `S_AttackStart`로 알리고, 위 "회피 판정과 지연 보정"과 같은 방식으로 판정한다. 돌진은 실제로 닿은 틱을 명중 시각으로 삼아 그 플레이어만 판정한다.
 - **검기(플레이어 → 몬스터)**: 일반 20 피해·반지름 55·1마리, 충전 35 × (1 + 2 × 충전량)·반지름 70~230·4~10마리. 1400cm/s로 날아가며 틱마다 지나간 구간을 쓸어, **가까운 순서로 관통하고 같은 몬스터를 두 번 맞히지 않는다.** 벽에서 사라지고 기둥 뒤 몬스터는 맞지 않는다.
 - **검기 검증**: 검기 사이 최소 0.6초. 충전량은 "직전 공격 뒤 지난 시간으로 모을 수 있었던 양"까지만 인정한다(완충 3초에 10% 여유). 충전 없이 완충을 연달아 보내면 절반은 거부되고 나머지는 0.3 이하로 깎인다.
-- **사망·부활**: HP가 0이면 죽은 상태다(몬스터가 노리지 않고 공격·회피를 받지 않는다). `C_Respawn`으로 시작 위치에서 부활하고 2초 동안 보호된다.
+- **사망·부활**: HP가 0이면 죽은 상태다(몬스터가 노리지 않고 공격·회피를 받지 않는다). 연습 방은 `C_Respawn`으로 시작 위치에서, 매치는 부활 대기 뒤 서버가 부활시키고 2초 동안 보호된다.
 - **부하**: 몬스터가 있는 방은 10초마다 틱 처리 시간을 로그에 남긴다. 48마리·플레이어 2명일 때 틱 평균 0.25ms, 최대 0.8ms(그중 몬스터 계산 0.13ms)였다. 틱 주기 50ms의 0.5%다.
-- **한계**: 성장(무기·각성·레벨) 보정이 아직 서버에 없어 검기는 기본 피해다. 경험치·장비 드롭·수문장·Q 스킬·자동 번개/회전 칼날은 온라인에서 아직 없다. 몬스터 위치는 되감지 않는다(클라이언트는 약 0.1초 전 위치를 본다. 검기 판정 반지름이 넉넉해 대부분 맞는다). 몬스터 목록은 틱마다 전부 보낸다(48마리 × 11바이트 × 20Hz ≈ 초당 10KB). 플레이어와 몬스터는 서로 밀어내지 않는다.
+- **한계**: 성장(레벨·스탯) 보정이 아직 서버에 없어 검기는 기본 피해다. 경험치는 아직 없다. 몬스터 위치는 되감지 않는다(클라이언트는 약 0.1초 전 위치를 본다. 검기 판정 반지름이 넉넉해 대부분 맞는다). 몬스터 목록은 틱마다 전부 보낸다(48마리 × 11바이트 × 20Hz ≈ 초당 10KB). 플레이어와 몬스터는 서로 밀어내지 않는다.
 
 ### 회피 판정과 지연 보정 (P1)
 
-무적 시간(PvE 0.15초)이 왕복 지연보다 짧아서, 서버가 도착 순서대로만 판정하면 "피했는데 맞는" 일이 생긴다. 그래서 다음처럼 판정한다(`src/game/CombatRules.h`).
+무적 시간(연습 방 0.15초)이 왕복 지연보다 짧아서, 서버가 도착 순서대로만 판정하면 "피했는데 맞는" 일이 생긴다. 그래서 다음처럼 판정한다(`src/game/CombatRules.h`).
 
 1. **명중 시각은 서버가 정한다.** 공격 시작 때 `S_AttackStart`로 명중 시각을 알리고, 클라이언트는 서버 시계 기준으로 예고를 재생한다. 플레이어가 보는 명중 순간이 서버 명중 시각과 같아져서, 남는 지연은 회피 입력이 서버로 가는 시간뿐이다.
 2. **회피 입력에 누른 시각을 붙인다.** 서버는 그 시각을 `[도착 − 허용 되감기, 도착]`으로 자른다. 허용 되감기 = `min(왕복/2 + 30ms, 모드 상한)`. 미래 시각과 상한보다 먼 과거는 인정하지 않는다.
@@ -147,12 +126,12 @@ PvE 방의 몬스터는 서버가 움직인다(`src/game/Monsters.*`). 1인 데�
 
 | 모드 | 무적 | 되감기 상한 | 공격 준비 | 이유 |
 |---|---|---|---|---|
-| PvE | 150ms | 200ms | (몬스터 패턴별, 시험 내려찍기 800ms) | 1인 데모 손맛 유지, 협동이라 지연 큰 팀원에게 관대 |
-| PvP | 300ms | 100ms | 350ms | 시각 조작 이득을 100ms로 제한. 무적을 늘려 왕복 100ms가 무적의 1/3을 넘지 않게 |
+| 연습 방 | 150ms | 200ms | (몬스터 패턴별, 시험 내려찍기 800ms) | 1인 데모 손맛 유지, 지연 큰 사람에게 관대 |
+| 매치 | 300ms | 100ms | 350ms | 시각 조작 이득을 100ms로 제한. 무적을 늘려 왕복 100ms가 무적의 1/3을 넘지 않게 |
 
 - 시각을 조작하거나 왕복 시간을 부풀려도 얻는 이득은 **상한까지**다. 상한만큼 지연이 큰 정직한 플레이어와 같은 조건이다.
-- PvP 공격은 서버 도착 시각 + 공격 준비 시간에 명중한다. 공격자 쪽은 되감지 않는다(준비 시간이 지연을 흡수). 대신 방어자에게 보이는 준비 시간은 자기 쪽 지연만큼 짧아진다.
-- 서버 HP가 0이 되면 죽은 상태가 되고 `C_Respawn`으로 부활한다(위 "몬스터와 검기").
+- 매치 근접 공격은 서버 도착 시각 + 공격 준비 시간에 명중한다. 공격자 쪽은 되감지 않는다(준비 시간이 지연을 흡수). 대신 방어자에게 보이는 준비 시간은 자기 쪽 지연만큼 짧아진다.
+- 서버 HP가 0이 되면 죽은 상태가 된다. 연습 방은 `C_Respawn`으로, 매치는 부활 대기 뒤 서버가 부활시킨다(위 "매치").
 
 ### 서버 권한 이동 (P1, 프로토콜 v3)
 
@@ -170,31 +149,29 @@ P0의 "클라이언트가 위치를 보내고 서버가 검증"을 **입력 전�
 
 ### 준비 (처음 한 번)
 
-- **Visual Studio 2022 이상**, 워크로드 "C++를 사용한 데스크톱 개발"(CMake 포함). 언리얼 빌드에 쓰는 것과 같은 설치면 된다.
-- **Git** (CMake가 asio를 받아 올 때 쓴다).
-- **Rust**(선택, Rust 전환 작업·시험용): <https://rustup.rs>에서 stable 설치. 없으면 `Test.ps1`이 Rust 시험을 `SKIP`으로 표시한다.
+- **Visual Studio 2022 이상**, 워크로드 "C++를 사용한 데스크톱 개발"(CMake 포함). 언리얼 빌드에 쓰는 것과 같은 설치면 된다. Rust 서버도 이동 헤더를 C++로 컴파일하므로 필요하다.
+- **Rust**: <https://rustup.rs>에서 stable 설치.
+- **Git** (CMake가 봇용 asio를 받아 올 때 쓴다).
 
 ### 스크립트로 (권장)
 
 PowerShell에서 저장소 폴더로 이동한 뒤:
 
 ```powershell
-.\Scripts\Build.ps1        # 빌드 → build\windowsin (처음에는 asio를 받아 온다)
-.\Scripts\RunServer.ps1    # 빌드 후 서버 실행(포트 7777). Ctrl+C로 종료
-.\Scripts\Test.ps1         # 단위 시험 + 봇 시나리오 전체. 줄마다 PASS/FAIL, 약 50초
+.\Scripts\RunServer.ps1                  # 서버 빌드 후 실행(포트 7777, 기획 시간표 36분). Ctrl+C로 종료
+.\Scripts\RunServer.ps1 -TimeScale 0.1   # 데모: 한 판 약 3.6분
+.\Scripts\Test.ps1                       # 봇·시험 도구 빌드 + 서버 빌드 + 시험 전체. 줄마다 PASS/FAIL, 약 50초
 ```
 
 스크립트 실행이 막혀 있으면 `powershell -ExecutionPolicy Bypass -File .\Scripts\RunServer.ps1`처럼 실행한다.
 
 | 스크립트 | 옵션 |
 |---|---|
-| `Build.ps1` | `-Debug`(디버그 빌드), `-Clean`(build\windows 삭제 후 빌드) |
-| `RunServer.ps1` | `-Port 7777`, `-Threads N`, `-NoMonsters`(PvE 방에 몬스터 없음), `-PveSlamMs 1500`(PvE 방에 1.5초마다 내려찍기 시험 패턴), `-NoBuild`, `-Rust`(Rust 서버 실행) |
-| `Test.ps1` | `-Port 17777`(시험 서버 포트), `-NoBuild`, `-UpdateGolden`(기준 기록 다시 만들기), `-Rust`(봇 시나리오를 Rust 서버에 돌린다). 로그는 `build\windows	est-logs` |
+| `RunServer.ps1` | `-Port 7777`, `-Threads N`, `-TimeScale 1.0`(매치 시간 배율), `-StartTeams 2`(이 수 이상의 팀이 모이면 시작, 1이면 혼자 시험), `-NoMonsters`(몬스터 없음), `-PracticeSlamMs 1500`(연습 방에 1.5초마다 내려찍기 시험 패턴), `-NoBuild` |
+| `Build.ps1` | C++ 봇·시험 도구 빌드 → `build\windows\bin`. `-Debug`, `-Clean` |
+| `Test.ps1` | `-Port 17777`(시험 서버 포트), `-NoBuild`, `-UpdateGolden`(기준 기록 다시 만들기). 로그는 `build\windows\test-logs` |
 
-### Visual Studio에서
-
-"폴더 열기"로 저장소 폴더를 열면 `CMakePresets.json`의 **Windows (MSVC)** 구성이 잡힌다. 시작 항목을 `ascension_server.exe`로 고르고 F5를 누르면 디버깅된다.
+서버를 직접 실행할 때의 옵션은 `rust/crates/server/src/main.rs` 맨 위에 있다(`--match-time-scale`, `--match-start-teams`, `--match-monsters`, `--practice-monsters`, `--practice-slam-ms`, `--map`).
 
 ### 다른 PC(팀원)에서 접속
 
@@ -212,7 +189,7 @@ New-NetFirewallRule -DisplayName "Ascension Server" -Direction Inbound -Protocol
 
 ```powershell
 .\Scripts\OpenOnline.ps1 -BuildRoot C:\Builds\AscensionPrototype -Name player1 -Team 1
-.\Scripts\OpenOnline.ps1 -BuildRoot C:\Builds\AscensionPrototype -Name player2 -Team 1
+.\Scripts\OpenOnline.ps1 -BuildRoot C:\Builds\AscensionPrototype -Name player2 -Team 2
 ```
 
 ### 봇으로 직접 확인
@@ -220,42 +197,33 @@ New-NetFirewallRule -DisplayName "Ascension Server" -Direction Inbound -Protocol
 `Test.ps1`이 아래를 모두 돌린다. 하나씩 보고 싶으면 서버를 켠 채로 다른 PowerShell 창에서:
 
 ```powershell
-cd build\windowsin
-.scension_bot --bots 7 --seconds 5                 # 3+3+1명 팀 배정, 이동 예측 오차 0
-.scension_bot --bots 4 --team-size 4               # 4번째는 정원 초과(RoomFull)
-.scension_bot --bots 3 --cheat                     # 0번 봇이 입력 3배 → 서버 속도는 처리권 상한에 머문다
-.scension_bot --bots 6 --burst                     # 매 틱 회피 → 재사용 대기 유지, 예측 오차 0
-.scension_bot --bots 1 --wall --seconds 6          # 기둥으로 계속 걷기 → 장애물에 파고들지 않음
-.scension_bot --bots 3 --seconds 6 --latency 300   # 지연 300ms에서도 예측 오차 0
-.scension_terrain_test                             # 충돌 지형 단위 시험(서버 없이)
-.scension_monster_test                             # 몬스터·검기 단위 시험(서버 없이, 시각을 직접 넣어 결과가 매번 같다)
-.scension_bot --hunt --bots 1 --seconds 20         # 검기로 사냥: 명중·처치·넉백·경직 확인, 죽으면 부활
-.scension_bot --monsters --expect-cap --bots 2 --team-size 2 --seconds 40   # 아무도 안 잡으면 정확히 48마리
-.scension_bot --wave-cheat --bots 1 --seconds 12   # 충전 없이 완충 검기 연사 → 거부되거나 깎인다
+cd build\windows\bin
+.\ascension_bot --bots 7 --seconds 5                 # 3+3+1명 팀 배정, 이동 예측 오차 0
+.\ascension_bot --bots 4 --team-size 4               # 연습 방: 4번째는 정원 초과(RoomFull)
+.\ascension_bot --bots 3 --cheat                     # 0번 봇이 입력 3배 → 서버 속도는 처리권 상한에 머문다
+.\ascension_bot --bots 6 --burst                     # 매 틱 회피 → 재사용 대기 유지, 예측 오차 0
+.\ascension_bot --bots 1 --wall --seconds 6          # 기둥으로 계속 걷기 → 장애물에 파고들지 않음
+.\ascension_bot --bots 3 --seconds 6 --latency 300   # 지연 300ms에서도 예측 오차 0
+.\ascension_terrain_test                             # 충돌 지형 단위 시험(서버 없이)
+.\ascension_monster_test                             # 몬스터·검기 단위 시험(서버 없이, 시각을 직접 넣어 결과가 매번 같다)
+.\ascension_bot --hunt --bots 1 --seconds 20         # 검기로 사냥: 명중·처치·넉백·경직 확인, 죽으면 부활
+.\ascension_bot --monsters --expect-cap --bots 2 --team-size 2 --seconds 40   # 아무도 안 잡으면 정확히 48마리
+.\ascension_bot --wave-cheat --bots 1 --seconds 12   # 충전 없이 완충 검기 연사 → 거부되거나 깎인다
 ```
 
 각 봇이 `PASS/FAIL`을 출력하고, 하나라도 실패하면 종료 코드 1을 돌려준다.
 
-회피 판정 시험은 박자가 일정해야 하므로 서버를 `.\Scripts\RunServer.ps1 -NoMonsters -PveSlamMs 1500`으로 켠 뒤:
+회피 판정 시험은 박자가 일정해야 하므로 서버를 `.\Scripts\RunServer.ps1 -NoMonsters -PracticeSlamMs 1500 -StartTeams 99`로 켠 뒤(매치가 시작하지 않아 자기장·라운드가 끼어들지 않는다):
 
 ```powershell
-.scension_bot --dodge-test --bots 1 --seconds 14 --latency 100                                 # PvE, 한쪽 지연 100ms
-.scension_bot --dodge-test --dodge-cheat --rtt-lie 2000 --bots 1 --seconds 16                   # 시각 조작 + 왕복 부풀리기
-.scension_bot --mode pvp --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 50          # PvP: 0번 봇이 공격
+.\ascension_bot --dodge-test --bots 1 --seconds 14 --latency 100                                 # 연습 방, 한쪽 지연 100ms
+.\ascension_bot --dodge-test --dodge-cheat --rtt-lie 2000 --bots 1 --seconds 16                   # 시각 조작 + 왕복 부풀리기
+.\ascension_bot --mode match --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 50        # 매치: 0번 봇(팀 1)이 1번 봇(팀 2)을 공격
 ```
 
 - 방어 봇은 공격마다 "무적 앞부분 / 명중 직전 / 명중 뒤 / 너무 이름 / 누르지 않음" 순서로 회피를 누르고, 서버 결과를 같은 규칙으로 계산한 기대값과 비교한다. 경계 25ms 안은 시계 추정 오차 때문에 비교에서 뺀다.
 - `--latency`는 송신·수신 각각에 인공 지연을 넣는다. `--dodge-cheat`는 늦게 누르고 시각을 앞당겨 보내는 조작을 섞는다.
 - 언리얼 클라이언트와 같은 방에 봇을 넣을 때는 `--allow-others`를 붙인다(봇이 아닌 플레이어의 이동을 받아도 실패로 치지 않는다).
-
-### Linux에서 빌드 (선택: ThreadSanitizer)
-
-MSVC에는 ThreadSanitizer가 없어서, 데이터 경합 검사는 Linux(GCC 14 이상, 예: WSL)에서 한다. 평소 개발·시험에는 필요 없다.
-
-```bash
-cmake --preset linux-tsan && cmake --build --preset linux-tsan     # build/linux-tsan/bin
-setarch $(uname -m) -R ./build/linux-tsan/bin/ascension_server --port 7778   # 최신 커널: 주소 무작위화를 꺼야 TSan이 시작된다
-```
 
 ## 검증 기록
 
@@ -270,6 +238,8 @@ setarch $(uname -m) -R ./build/linux-tsan/bin/ascension_server --port 7778   # �
 | 2026-11-16 | Windows, MSVC 19.51 + Rust 1.99.1 | Rust 전환 2단계(충돌 지형·전투 규칙·몬스터): `Test.ps1` 30개 PASS(기존 27 + 기준 기록 2 + Rust 시험 39개). Rust 이식본이 C++ 기록 28줄과 비트 단위로 같음: 충돌 격자(막힘 566·단단함 757), 경로·시야 4,000쌍(경로 막힘 1,047·시야 막힘 884), 몬스터 1,200틱(생성 42·처치 36·예고 270·돌진 접촉 42·피격 106). C++ 단위 시험 지형 21개·몬스터 30개를 옮겨 모두 PASS, 증원은 48마리 상한에 24.75초 도달. 최적화 0·2·release 모두 같음, clippy 경고 0. Linux 빌드는 아직 확인하지 않음 |
 | 2026-11-16 | Windows, MSVC 19.51 + Rust 1.99.1 | Rust 전환 3단계(네트워크·방): **C++ 봇 시나리오 27개를 Rust 서버에 돌려 전부 PASS**(`Test.ps1 -Rust` 30개 PASS, 2회 연속). 예측 오차 0.00cm(지연 300ms 포함), 회피 판정 비교 105건 불일치 0(경계 제외 4), 속도 조작·충전 조작 차단, 48마리 상한. 사냥 봇 명중 42·처치 30·넉백 12. 틱 평균 0.18ms(48마리·2명, 그중 몬스터 계산 0.12ms). 봇 60개(방 20개) 10초 PASS, 방 20개 모두 정상 종료, 메모리 14MB. Rust 시험 46개(소켓으로 붙는 시험 4개 포함), clippy 경고 0. C++ 서버도 그대로 30개 PASS. **언리얼 클라이언트로는 아직 확인하지 않음.** Linux 빌드도 아직 확인하지 않음 |
 
+| 2026-11-27 | Windows, MSVC 19.51 + Rust 1.99.1 | 배틀로얄 매치(프로토콜 v5)와 C++ 서버 제거: `Test.ps1` 30개 PASS(C++ 단위 2 + 기준 기록 2 + Rust 시험 + 봇 시나리오 25). Rust 시험에 매치 시간표 4개·방 단위 매치 6개(대기→카운트다운→기지 시작, 팀 이탈 시 대기, 아군 공격 차단, 1~3라운드 부활 위치, 4라운드 탈락·승리·초기화, 자기장 피해와 동시 전멸 무승부)·소켓 매치 입장 1개 추가. 시간 배율 0.01 실제 서버 + 봇 2개: 카운트다운 → 시작 → 4라운드 자기장 탈락 → 무승부 → 초기화 → 다음 판 확인. 기준 기록은 버전 줄만 바뀜. **언리얼 클라이언트로는 아직 확인하지 않음** |
+
 세부 내용은 클라이언트 저장소 `Verification/RESULTS.md`에 날짜별로 있다. WSL에서 서버를 돌릴 때는 WSL 시계가 Windows보다 수 % 빠르게 흘러 클라이언트의 서버 시계 추정에 10~40ms 오차가 있었다. Windows에서 직접 실행하면서 사라졌다.
 
 ## 작업 규칙
@@ -280,9 +250,9 @@ setarch $(uname -m) -R ./build/linux-tsan/bin/ascension_server --port 7778   # �
 
 ## 다음 단계
 
-P1 남은 항목(회피 판정·지연 보정, 충돌 지형, 서버 권한 이동, 몬스터·검기는 위에서 완료):
+기획 전환(배틀로얄) 뒤의 데모 순서(클라이언트 저장소 `Docs/데모_작업분담.md`):
 
-1. 수문장 패턴을 서버 상태 머신으로(내려찍기 시험 패턴을 실제 패턴으로 교체)
-2. 경험치 구슬 소유권, 각성 후보 RNG, 선택 검증, 성장 보정을 서버 피해 계산에 반영
-3. Q 스킬·회피 폭발·자동 번개/회전 칼날의 서버 판정
+1. 언리얼 클라이언트를 프로토콜 v5에 맞추기: 팀 입장, `S_MatchState`(라운드·자기장 표시), `S_PlayerDied`(부활 대기·탈락 표시)
+2. 몬스터·플레이어 처치 경험치와 레벨업, 스킬 포인트 지급
+3. 검·활 스킬의 서버 판정(클라이언트 `CLSwordSkills.cpp`·`CLBowSkills.cpp`의 스킬 표를 서버로 옮김)과 플레이어 대상 검기·투사체
 4. 몬스터 목록 전송 줄이기(바뀐 것만, 관심 영역)
