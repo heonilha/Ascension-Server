@@ -129,16 +129,16 @@ fn charger_tell_dash_and_touch() {
     assert_eq!(find(&field, id).phase, MonsterState::Recover, "charger_recovers_after_dash");
 }
 
-/// 돌진은 벽에서 멈춘다: 동쪽 경계벽(x=5000)을 향해
+/// 돌진은 벽에서 멈춘다: 동쪽 경계벽(x=25000)을 향해
 #[test]
 fn charger_stops_at_wall() {
     let map = load();
     let mut field = field(&map);
     let mut now = 1000;
-    let id = field.spawn_at(1, 4650.0, 600.0, now).id; // 캠프 화로(4660, 0)를 피한 줄
+    let id = field.spawn_at(1, 24650.0, 0.0, now).id;
     let mut max_x = 0.0f32;
-    run(&mut field, &mut now, 1.6, &[player(1, 4940.0, 600.0)], |field, _, _| max_x = max_x.max(find(field, id).x));
-    assert!(max_x <= 5000.0 - t::RADIUS + 0.5 && max_x > 4900.0, "max x {max_x}");
+    run(&mut field, &mut now, 1.6, &[player(1, 24940.0, 0.0)], |field, _, _| max_x = max_x.max(find(field, id).x));
+    assert!(max_x <= 25000.0 - t::RADIUS + 0.5 && max_x > 24900.0, "max x {max_x}");
 }
 
 /// 피격: 넉백 30cm(피해 20), 경직 0.16초, 예고 취소, 0.35초 안에는 다시 경직되지 않음
@@ -202,11 +202,11 @@ fn knockback_blocked_by_wall() {
     let map = load();
     let mut field = field(&map);
     let mut now = 1000;
-    let id = field.spawn_at(0, 5000.0 - t::RADIUS - 5.0, 0.0, now).id;
+    let id = field.spawn_at(0, 25000.0 - t::RADIUS - 5.0, 0.0, now).id;
     let mut events = MonsterEvents::default();
     field.damage(id, 1, 40.0, 1.0, 0.0, now, &mut events);
     run(&mut field, &mut now, 0.2, &[], |_, _, _| {});
-    assert!(find(&field, id).x <= 5000.0 - t::RADIUS + 0.01);
+    assert!(find(&field, id).x <= 25000.0 - t::RADIUS + 0.01);
 }
 
 /// 검기: 일반은 가장 가까운 한 마리만, 충전은 가까운 순서로 한 번씩 관통
@@ -282,7 +282,7 @@ fn spawning_fills_to_cap_and_refills() {
             known = field.monsters().len();
         }
         for m in field.monsters() {
-            spawn_ok &= map.solid_clearance(Vec2 { x: m.x, y: m.y }) > t::RADIUS - 1.0 && m.x.abs() <= 5000.0 && m.y.abs() <= 5000.0;
+            spawn_ok &= map.solid_clearance(Vec2 { x: m.x, y: m.y }) > t::RADIUS - 1.0 && m.x.abs() <= 25000.0 && m.y.abs() <= 25000.0;
         }
     });
     println!("증원: 최대 {max_count}마리, {}초에 상한 도달, 누적 생성 {}", cap_at_ms as f32 / 1000.0, field.total_spawned());
@@ -335,7 +335,7 @@ fn without_map_monsters_stay_inside_arena() {
     let players = [player(1, 4900.0, 4900.0)];
     let mut inside = true;
     run(&mut field, &mut now, 20.0, &players, |field, _, _| {
-        inside &= field.monsters().iter().all(|m| m.x.abs() <= 5000.0 - t::RADIUS + 0.01 && m.y.abs() <= 5000.0 - t::RADIUS + 0.01);
+        inside &= field.monsters().iter().all(|m| m.x.abs() <= 25000.0 - t::RADIUS + 0.01 && m.y.abs() <= 25000.0 - t::RADIUS + 0.01);
     });
     assert!(inside, "outside: {:?}", field.monsters().iter().map(|m| (m.x, m.y)).collect::<Vec<_>>());
     assert!(!field.monsters().is_empty());

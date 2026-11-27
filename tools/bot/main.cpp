@@ -639,7 +639,7 @@ namespace
                 stats_.monstersSeen.insert(entry.id);
                 if (entry.kind < 3) stats_.monsterKinds[entry.kind] = true;
                 const float x = entry.x, y = entry.y;
-                stats_.monsterOutside |= std::abs(x) > 5000.f || std::abs(y) > 7600.f;
+                stats_.monsterOutside |= std::abs(x) > 25000.f || std::abs(y) > 28200.f;
                 for (const move::Obstacle& o : options_.world->obstacles)
                 {
                     if (move::Solid(o)) stats_.monsterMinClearance = std::min(stats_.monsterMinClearance, move::SignedDistance({x, y}, o.polygon));

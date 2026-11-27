@@ -7,9 +7,9 @@
 
 use asc_protocol::MatchPhase;
 
-/// 라운드 n(1~4)이 시작할 때의 자기장 반지름(cm). 1라운드는 필드 전체(100m × 100m의 대각선 절반 ≈ 7071)를 덮는다.
-/// 2라운드는 팀 기지(중심에서 40m)까지 덮는다. 라운드 n이 끝나면 축소 단계 동안 다음 값으로 줄고, 4라운드는 진행 내내 0까지 준다.
-pub const ZONE_RADIUS: [f32; 4] = [7100.0, 4600.0, 2800.0, 1500.0];
+/// 라운드 n(1~4)이 시작할 때의 자기장 반지름(cm). 1라운드는 필드 전체(500m × 500m의 대각선 절반 ≈ 35355)를 덮는다.
+/// 2라운드는 팀 기지(중심에서 160m)까지 덮는다. 라운드 n이 끝나면 축소 단계 동안 다음 값으로 줄고, 4라운드는 진행 내내 0까지 준다.
+pub const ZONE_RADIUS: [f32; 4] = [35500.0, 20000.0, 12000.0, 6000.0];
 
 /// 균열 보상(임시): 팀원 모두 경험치와 스탯 포인트 +3(기획안). 경험치는 1라운드 끝 12레벨 기준으로 한두 레벨 분량.
 pub const RIFT_REWARD_XP: u32 = 400;
@@ -157,6 +157,8 @@ pub struct RunningPhase {
     pub end_offset_ms: u32,
     pub radius_from: f32,
     pub radius_to: f32,
+    /// 다음 축소가 끝날 반지름. 1~3라운드 중에는 다음 라운드 반지름, 축소 중과 4라운드는 radius_to
+    pub next_radius: f32,
     pub damage_percent: f32,
     /// 지금 죽으면 이만큼 기다렸다 부활한다. `None` = 탈락
     pub respawn_wait_ms: Option<u32>,
@@ -189,6 +191,7 @@ pub fn running_phase(schedule: &MatchSchedule, elapsed_ms: u32) -> RunningPhase 
                 radius_from: ZONE_RADIUS[round],
                 // 1~3라운드는 고정, 4라운드는 중앙 한 점까지 계속 준다
                 radius_to: if last { 0.0 } else { ZONE_RADIUS[round] },
+                next_radius: if last { 0.0 } else { ZONE_RADIUS[round + 1] },
                 damage_percent: ZONE_DAMAGE_PERCENT[round],
                 respawn_wait_ms: (!last).then(|| schedule.respawn_ms[round]),
             };
@@ -202,6 +205,7 @@ pub fn running_phase(schedule: &MatchSchedule, elapsed_ms: u32) -> RunningPhase 
                 end_offset_ms: shrink_end,
                 radius_from: ZONE_RADIUS[round],
                 radius_to: ZONE_RADIUS[round + 1],
+                next_radius: ZONE_RADIUS[round + 1],
                 damage_percent: ZONE_DAMAGE_PERCENT[round],
                 // 3라운드 뒤 축소 중 사망도 3라운드 사망으로 친다(마지막 부활 기회)
                 respawn_wait_ms: Some(schedule.respawn_ms[round]),
@@ -244,11 +248,13 @@ mod tests {
         let p = running_phase(&s, 0);
         assert_eq!(
             (p.phase, p.round, p.radius_from, p.radius_to, p.damage_percent, p.respawn_wait_ms),
-            (MatchPhase::Round, 1, 7100.0, 7100.0, 1.0, Some(10_000))
+            (MatchPhase::Round, 1, 35500.0, 35500.0, 1.0, Some(10_000))
         );
         let p = running_phase(&s, 15 * min);
-        assert_eq!((p.phase, p.round, p.radius_from, p.radius_to), (MatchPhase::Shrink, 1, 7100.0, 4600.0));
-        assert_eq!(p.radius_at(15 * min + 30_000), 5850.0); // 축소 절반
+        assert_eq!((p.phase, p.round, p.radius_from, p.radius_to), (MatchPhase::Shrink, 1, 35500.0, 20000.0));
+        assert_eq!(p.radius_at(15 * min + 30_000), 27750.0); // 축소 절반
+        assert_eq!(running_phase(&s, 0).next_radius, 20000.0); // 1라운드 중에 다음 자리를 미리 안다
+        assert_eq!(p.next_radius, 20000.0);
         let p = running_phase(&s, 16 * min);
         assert_eq!((p.phase, p.round, p.damage_percent, p.respawn_wait_ms), (MatchPhase::Round, 2, 2.0, Some(20_000)));
         let p = running_phase(&s, 27 * min + 1);
@@ -256,8 +262,9 @@ mod tests {
         let p = running_phase(&s, 32 * min + 1); // 3라운드 뒤 축소: 아직 부활 가능
         assert_eq!((p.phase, p.round, p.respawn_wait_ms), (MatchPhase::Shrink, 3, Some(30_000)));
         let p = running_phase(&s, 33 * min);
-        assert_eq!((p.phase, p.round, p.radius_from, p.radius_to, p.damage_percent, p.respawn_wait_ms), (MatchPhase::Round, 4, 1500.0, 0.0, 8.0, None));
-        assert_eq!(p.radius_at(33 * min + 90_000), 750.0);
+        assert_eq!((p.phase, p.round, p.radius_from, p.radius_to, p.damage_percent, p.respawn_wait_ms), (MatchPhase::Round, 4, 6000.0, 0.0, 8.0, None));
+        assert_eq!(p.radius_at(33 * min + 90_000), 3000.0);
+        assert_eq!(p.next_radius, 0.0);
         // 4라운드가 끝난 뒤에도 4라운드, 반지름 0
         let p = running_phase(&s, 50 * min);
         assert_eq!((p.round, p.radius_at(50 * min)), (4, 0.0));

@@ -12,7 +12,7 @@ use bytemuck::{Pod, Zeroable};
 #[cfg(not(target_endian = "little"))]
 compile_error!("프로토콜은 리틀 엔디언 전용이다.");
 
-pub const VERSION: u16 = 7;
+pub const VERSION: u16 = 8;
 pub const MAX_PACKET_SIZE: u16 = 4096;
 /// UTF-8, 널 문자 포함
 pub const NAME_LENGTH: usize = 32;
@@ -24,8 +24,10 @@ pub const MAX_TEAMS: u8 = 4;
 pub const MAX_TEAM_PLAYERS: u8 = 3;
 /// 매치 최대 인원(12)
 pub const MAX_MATCH_PLAYERS: u8 = MAX_TEAMS * MAX_TEAM_PLAYERS;
-/// 방 하나의 최대 몬스터 수
+/// 연습 방의 최대 몬스터 수(무작위 증원 상한)
 pub const MAX_MONSTERS: u8 = 48;
+/// 매치(500m 필드 캠프)의 최대 몬스터 수
+pub const MAX_MATCH_MONSTERS: u8 = 160;
 pub const DEFAULT_PORT: u16 = 7777;
 /// 서버 틱 20Hz. `SMoveBatch::server_tick` × 이 값 = 서버 시간
 pub const SERVER_TICK_MS: u32 = 50;
@@ -614,7 +616,7 @@ packet! {
 packet! {
     /// 단계가 바뀔 때, 남은 팀 수가 바뀔 때, 입장했을 때, 그리고 2초마다 보낸다.
     /// 자기장 반지름은 [phase_start_server_ms, phase_end_server_ms] 동안 zone_radius_from → zone_radius_to로 일정하게 줄어든다.
-    SMatchState [37] {
+    SMatchState [41] {
         /// `MatchPhase` 값
         phase: u8,
         /// 1~4. 시작 전 0
@@ -628,6 +630,8 @@ packet! {
         zone_radius_to: f32,
         /// 자기장 밖 피해: 초당 최대 체력의 이 퍼센트(0 = 피해 없음)
         zone_damage_percent: f32,
+        /// 다음 축소가 끝날 반지름(라운드 중 미리 보여 준다). 축소 중이면 zone_radius_to와 같다
+        zone_next_radius: f32,
         teams_alive: u8,
         /// Ended일 때 이긴 팀(0 = 없음)
         winner_team: u8,

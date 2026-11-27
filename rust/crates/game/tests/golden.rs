@@ -44,7 +44,7 @@ impl Random {
 fn rust_port_matches_cpp_golden() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let map = Arc::new(CollisionMap::load(&root.join("../../../data/CombatLab.txt")).expect("map loads"));
-    let golden = std::fs::read_to_string(root.join("tests/golden/game_v7.txt")).expect("golden file");
+    let golden = std::fs::read_to_string(root.join("tests/golden/game_v8.txt")).expect("golden file");
 
     let mut actual = String::new();
     writeln!(actual, "# game golden: protocol v{}, {} obstacles", asc_protocol::VERSION, map.obstacle_count()).unwrap();

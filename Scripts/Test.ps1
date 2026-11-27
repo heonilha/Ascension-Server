@@ -84,8 +84,8 @@ try {
 
     # Golden records: what the C++ build computes now must equal the committed record the Rust tests compare against.
     $goldens = [ordered]@{
-        'movement_golden' = 'rust\crates\movement\tests\golden\movement_v7.txt' # shared movement header (FFI)
-        'game_golden'     = 'rust\crates\game\tests\golden\game_v7.txt'         # collision map + monsters (ported to Rust)
+        'movement_golden' = 'rust\crates\movement\tests\golden\movement_v8.txt' # shared movement header (FFI)
+        'game_golden'     = 'rust\crates\game\tests\golden\game_v8.txt'         # collision map + monsters (ported to Rust)
     }
     foreach ($name in $goldens.Keys) {
         $goldenFile = Join-Path $root $goldens[$name]
@@ -106,7 +106,7 @@ try {
     if (-not $ok) { $failed++ }
     Write-Host ('{0,-18} {1}' -f 'rust_tests', $(if ($ok) { 'PASS' } else { 'FAIL' }))
 
-    $server = Start-Process -FilePath $serverExe -ArgumentList "--port $Port --threads 4 --practice-monsters 0 --practice-slam-ms 1500 --match-monsters 0 --match-start-teams 99" `
+    $server = Start-Process -FilePath $serverExe -ArgumentList "--port $Port --threads 4 --practice-monsters 0 --practice-slam-ms 1500 --match-monsters 0 --match-start-teams 99 --match-base-radius 4000" `
         -RedirectStandardOutput (Join-Path $logs 'server.log') -RedirectStandardError (Join-Path $logs 'server.err.log') -PassThru -NoNewWindow
     $monsterPort = $Port + 1
     $monsterServer = Start-Process -FilePath $serverExe -ArgumentList "--port $monsterPort --threads 4" `

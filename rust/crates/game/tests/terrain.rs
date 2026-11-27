@@ -23,20 +23,20 @@ fn local(cx: f32, cy: f32, yaw_degrees: f32, lx: f32, ly: f32) -> Vec3 {
 }
 
 #[test]
-fn obstacle_count_112() {
-    assert_eq!(load().obstacle_count(), 112);
+fn obstacle_count_408() {
+    assert_eq!(load().obstacle_count(), 408);
 }
 
-/// 맵 배치 표식: 풀숲 18, 캠프 10(외곽 4·폐허 4·정예 2), 균열 입구 2, 전투장 1
+/// 맵 배치 표식: 풀숲 84, 캠프 38(외곽 20·폐허 12·정예 6), 균열 입구 2, 전투장 1
 #[test]
 fn field_layout_areas() {
     let map = load();
     let layout = asc_game::field::FieldLayout::from_map(Some(&map));
-    assert_eq!((layout.bushes.len(), layout.camps.len(), layout.rift_gates.len()), (18, 10, 2));
+    assert_eq!((layout.bushes.len(), layout.camps.len(), layout.rift_gates.len()), (84, 38, 2));
     assert!(layout.has_rift());
     let arena = layout.rift_arena.unwrap();
-    assert_eq!((arena.x, arena.y, arena.radius), (0.0, 6500.0, 1000.0));
-    assert_eq!(layout.camps.iter().map(|c| c.kinds.len()).sum::<usize>(), 4 * 3 + 4 * 4 + 2 * 3);
+    assert_eq!((arena.x, arena.y, arena.radius), (0.0, 27000.0, 1000.0));
+    assert_eq!(layout.camps.iter().map(|c| c.kinds.len()).sum::<usize>(), 20 * 3 + 12 * 4 + 6 * 3);
     // 캠프·풀숲·입구 자리는 막히지 않는다
     for c in &layout.camps {
         assert!(!map.blocked(at(c.x, c.y), R), "camp {} {} blocked", c.x, c.y);
@@ -44,10 +44,11 @@ fn field_layout_areas() {
     for g in &layout.rift_gates {
         assert!(!map.blocked(at(g.x, g.y), R));
     }
-    assert_eq!(layout.bush_at(1150.0, -550.0), Some(16));
+    let bush = &layout.bushes[0];
+    assert_eq!(layout.bush_at(bush.x, bush.y), Some(0));
     assert_eq!(layout.bush_at(0.0, 0.0), None);
     // 전투장은 벽으로 막혀 있다: 중심은 비어 있고 반지름 바깥은 막힌다
-    assert!(!map.blocked(at(0.0, 6500.0 - 600.0), R) && map.blocked(at(0.0, 6500.0 + 1060.0), R));
+    assert!(!map.blocked(at(0.0, 27000.0 - 600.0), R) && map.blocked(at(0.0, 27000.0 + 1060.0), R));
 }
 
 #[test]
@@ -69,9 +70,9 @@ fn columns_walls_and_rocks() {
     assert!(map.blocked(at(-2200.0 + 95.0 + 20.0, -1300.0), R), "cover_rock_radius95_blocked");
     assert!(!map.blocked(at(-2200.0 + 95.0 + 30.0, -1300.0), R), "cover_rock_outside_free");
 
-    // 보이지 않는 경계벽(x 5000~5040)
-    assert!(map.blocked(at(4990.0, 0.0), R), "east_limit_blocked");
-    assert!(!map.blocked(at(4960.0, 0.0), R), "near_east_limit_free");
+    // 보이지 않는 경계벽(x 25000~25040)
+    assert!(map.blocked(at(24990.0, 0.0), R), "east_limit_blocked");
+    assert!(!map.blocked(at(24960.0, 0.0), R), "near_east_limit_free");
 
     // 높이: 상인방 높이로 떠 있는 캡슐은 막힌다(높이 범위 검사)
     assert!(map.blocked(Vec3 { x: -1550.0, y: -850.0, z: 300.0 }, R), "lintel_height_blocked");

@@ -22,7 +22,7 @@ use crate::field::CampSpot;
 use crate::rng::Rng;
 use crate::room_layout::{ARENA_HALF_DEPTH, ARENA_HALF_WIDTH, WORLD_HALF_DEPTH, WORLD_HALF_WIDTH};
 use asc_movement::{Vec2, GROUND_Z};
-use asc_protocol::{MonsterState, Vec3, MAX_MONSTERS};
+use asc_protocol::{MonsterState, Vec3, MAX_MATCH_MONSTERS, MAX_MONSTERS};
 use std::sync::Arc;
 
 /// 몬스터 수치. 배열은 종류별 [검병, 폭주, 지휘관].
@@ -425,7 +425,7 @@ impl MonsterField {
         let spot = self.camps[index].spot.clone();
         let count = spot.kinds.len().max(1);
         for (k, &kind) in spot.kinds.iter().enumerate() {
-            if self.monsters.len() >= MAX_MONSTERS as usize {
+            if self.monsters.len() >= MAX_MATCH_MONSTERS as usize {
                 return;
             }
             // 캠프 중심 둘레에 고르게. 막힌 자리면 조금씩 돌려 본다.

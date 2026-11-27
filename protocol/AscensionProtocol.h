@@ -15,14 +15,15 @@
 
 namespace asc::proto
 {
-    inline constexpr std::uint16_t kVersion = 7;
+    inline constexpr std::uint16_t kVersion = 8;
     inline constexpr std::uint16_t kMaxPacketSize = 4096;
     inline constexpr std::size_t kNameLength = 32;     // UTF-8, 널 문자 포함
     inline constexpr std::uint8_t kMaxPracticePlayers = 3; // 연습 방 최대 인원
     inline constexpr std::uint8_t kMaxTeams = 4;           // 매치 하나의 최대 팀 수(팀 번호 1~4)
     inline constexpr std::uint8_t kMaxTeamPlayers = 3;     // 팀 하나의 최대 인원
     inline constexpr std::uint8_t kMaxMatchPlayers = kMaxTeams * kMaxTeamPlayers; // 매치 최대 인원(12)
-    inline constexpr std::uint8_t kMaxMonsters = 48;       // 방 하나의 최대 몬스터 수
+    inline constexpr std::uint8_t kMaxMonsters = 48;       // 연습 방의 최대 몬스터 수(무작위 증원 상한)
+    inline constexpr std::uint8_t kMaxMatchMonsters = 160; // 매치(500m 필드 캠프)의 최대 몬스터 수
     inline constexpr std::uint16_t kDefaultPort = 7777;
     inline constexpr std::uint32_t kServerTickMs = 50; // 서버 틱 20Hz. S_MoveBatch.serverTick × 이 값 = 서버 시간
     inline constexpr std::uint8_t kSkillSlots = 4;         // 배울 수 있는 스킬 수(검·활 합쳐서)
@@ -479,6 +480,7 @@ namespace asc::proto
         float zoneX, zoneY;              // 자기장 중심
         float zoneRadiusFrom, zoneRadiusTo;
         float zoneDamagePercent;         // 자기장 밖 피해: 초당 최대 체력의 이 퍼센트(0 = 피해 없음)
+        float zoneNextRadius;            // 다음 축소가 끝날 반지름(라운드 중 미리 보여 준다). 축소 중이면 zoneRadiusTo와 같다
         std::uint8_t teamsAlive;         // 탈락하지 않은 팀 수
         std::uint8_t winnerTeam;         // Ended일 때 이긴 팀(0 = 없음)
         std::uint8_t respawnAllowed;     // 1 = 지금 죽으면 부활한다(1~3라운드), 0 = 탈락(4라운드)
@@ -629,7 +631,7 @@ namespace asc::proto
     static_assert(sizeof(C_Respawn) == 4);
     static_assert(sizeof(S_Respawn) == 24);
     static_assert(sizeof(S_HitResult) == 31);
-    static_assert(sizeof(S_MatchState) == 37);
+    static_assert(sizeof(S_MatchState) == 41);
     static_assert(sizeof(S_PlayerDied) == 17);
     static_assert(sizeof(S_PlayerProgress) == 27);
     static_assert(sizeof(S_Teleport) == 25);

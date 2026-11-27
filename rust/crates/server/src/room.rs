@@ -24,7 +24,7 @@ use asc_game::match_rules::{self, running_phase, MatchSchedule, RunningPhase, ZO
 use asc_game::monsters::{tuning, MonsterEvents, MonsterField, MonsterPlayer};
 use asc_game::progression::{self, Progress, MONSTER_XP};
 use asc_game::rng::Rng;
-use asc_game::room_layout::{practice_spawn_position, team_spawn_position, ARENA_HALF_DEPTH, ARENA_HALF_WIDTH};
+use asc_game::room_layout::{practice_spawn_position, team_spawn_position_at, ARENA_HALF_DEPTH, ARENA_HALF_WIDTH, TEAM_BASE_RADIUS};
 use asc_game::CollisionMap;
 use asc_movement::{World, GROUND_Z, RADIUS, TICK_RATE};
 use asc_protocol::*;
@@ -106,6 +106,8 @@ pub struct RoomOptions {
     pub xp_scale: f32,
     /// 충돌 지형. 있으면 이동(장애물 안·통과)과 공격(엄폐)을 지형으로도 검사한다. 모든 방이 같은 것을 읽기만 한다.
     pub map: Option<Arc<CollisionMap>>,
+    /// 매치 팀 기지 원의 반지름(cm). 없으면 맵의 기지 자리(TEAM_BASE_RADIUS). 봇 시험이 두 팀을 가까이 세울 때만 쓴다.
+    pub base_radius: Option<f32>,
 }
 
 pub enum RoomCommand {
@@ -550,7 +552,7 @@ impl Room {
         // 팀 안의 빈 자리(0~2). RoomManager가 팀 정원을 먼저 확인했다.
         let team_slot = (0..3).find(|s| self.members.iter().all(|m| m.team != team || m.team_slot != *s)).unwrap_or(0);
         let position = match self.mode {
-            RoomMode::Match => team_spawn_position(team, team_slot),
+            RoomMode::Match => self.team_spawn(team, team_slot),
             RoomMode::Practice => practice_spawn_position(slot),
         };
         let mut sim = MoveSimState::zeroed();
@@ -985,12 +987,17 @@ impl Room {
         teams
     }
 
+    fn team_spawn(&self, team: u8, slot: usize) -> Vec3 {
+        team_spawn_position_at(team, slot, self.options.base_radius.unwrap_or(TEAM_BASE_RADIUS))
+    }
+
     fn match_state(&self, now_ms: u32) -> SMatchState {
         let mut state = make::<SMatchState>();
         state.zone_x = ZONE_CENTER.0;
         state.zone_y = ZONE_CENTER.1;
         state.zone_radius_from = ZONE_RADIUS[0];
         state.zone_radius_to = ZONE_RADIUS[0];
+        state.zone_next_radius = ZONE_RADIUS[0];
         state.teams_alive = self.alive_teams().len() as u8;
         state.respawn_allowed = 1;
         match self.stage {
@@ -1008,6 +1015,7 @@ impl Room {
                 state.phase_end_server_ms = start_ms + phase.end_offset_ms;
                 state.zone_radius_from = phase.radius_from;
                 state.zone_radius_to = phase.radius_to;
+                state.zone_next_radius = phase.next_radius;
                 state.zone_damage_percent = phase.damage_percent;
                 state.respawn_allowed = phase.respawn_wait_ms.is_some() as u8;
             }
@@ -1108,7 +1116,7 @@ impl Room {
 
     fn revive_everyone_at_bases(&mut self, now_ms: u32) {
         for index in 0..self.members.len() {
-            let position = team_spawn_position(self.members[index].team, self.members[index].team_slot);
+            let position = self.team_spawn(self.members[index].team, self.members[index].team_slot);
             self.revive(index, position, now_ms);
         }
     }
@@ -1214,7 +1222,7 @@ impl Room {
         let radius = self.zone_radius(now_ms);
         let inner = (radius * 0.75 - 100.0).max(0.0);
         let enemies: Vec<(f32, f32)> = self.members.iter().filter(|m| m.team != team && !m.dead).map(|m| (m.position.x, m.position.y)).collect();
-        let mut candidates = vec![team_spawn_position(team, 1)];
+        let mut candidates = vec![self.team_spawn(team, 1)];
         for _ in 0..RESPAWN_CANDIDATES {
             let angle = self.rng.range(0.0, std::f32::consts::TAU);
             let distance = inner * self.rng.range(0.0, 1.0).sqrt();
@@ -1669,10 +1677,11 @@ mod tests {
         let mut enemy = join(&mut room, 1, 1);
         join(&mut room, 2, 2);
         let mut ally = join(&mut room, 3, 2);
-        // 풀숲 16: (1150, -550) 반지름 260
-        place(&mut room, 2, 1150.0, -550.0);
-        place(&mut room, 1, 1150.0, 200.0); // 7.5m 밖
-        place(&mut room, 3, 1150.0, 300.0);
+        // 맵의 첫 풀숲(반지름 약 3m) 가운데에 숨는다
+        let (bx, by) = (room.layout.bushes[0].x, room.layout.bushes[0].y);
+        place(&mut room, 2, bx, by);
+        place(&mut room, 1, bx, by + 750.0); // 7.5m 밖
+        place(&mut room, 3, bx, by + 850.0);
         move_entries(&mut enemy);
         move_entries(&mut ally);
         room.send_move_batches(1000);
@@ -1685,11 +1694,11 @@ mod tests {
         room.send_move_batches(1050);
         assert_eq!(seen(&move_entries(&mut enemy)), None, "no_updates_while_hidden");
         // 3m 안으로 다가오면 보인다
-        place(&mut room, 1, 1150.0, -300.0);
+        place(&mut room, 1, bx, by + 250.0);
         room.send_move_batches(1100);
         assert_eq!(seen(&move_entries(&mut enemy)), Some(MoveState::Idle.raw()), "close_enemy_sees");
         // 멀어지면 다시 숨고, 공격하면 1.5초 드러난다
-        place(&mut room, 1, 1150.0, 200.0);
+        place(&mut room, 1, bx, by + 750.0);
         room.send_move_batches(1150);
         assert_eq!(seen(&move_entries(&mut enemy)), Some(MoveState::Hidden.raw()));
         let index = room.find(2).unwrap();
@@ -1825,13 +1834,14 @@ mod tests {
         let t0 = start(&mut room, 2000);
         // 1라운드 시작: 팀 시작 위치로
         let p = member(&room, 1).position;
-        assert_eq!(({ p.x }, { p.y }), ({ team_spawn_position(1, 0).x }, { team_spawn_position(1, 0).y }));
+        assert_eq!(({ p.x }, { p.y }), ({ asc_game::room_layout::team_spawn_position(1, 0).x }, { asc_game::room_layout::team_spawn_position(1, 0).y }));
         assert_eq!((member(&room, 2).team_slot, member(&room, 3).team), (1, 3));
         let state = room.match_state(t0 + 1);
-        assert_eq!((state.phase, state.round, state.teams_alive, { state.zone_radius_to }), (MatchPhase::Round.raw(), 1, 2, 7100.0));
+        assert_eq!((state.phase, state.round, state.teams_alive, { state.zone_radius_to }), (MatchPhase::Round.raw(), 1, 2, 35500.0));
+        assert_eq!({ state.zone_next_radius }, 20000.0, "round_shows_next_zone");
         // 1라운드 끝 → 축소
         let state = room.match_state(t0 + 1100);
-        assert_eq!((state.phase, state.round, { state.zone_radius_from }, { state.zone_radius_to }), (MatchPhase::Shrink.raw(), 1, 7100.0, 4600.0));
+        assert_eq!((state.phase, state.round, { state.zone_radius_from }, { state.zone_radius_to }), (MatchPhase::Shrink.raw(), 1, 35500.0, 20000.0));
     }
 
     #[test]
@@ -1976,15 +1986,15 @@ mod tests {
         join(&mut room, 1, 1);
         join(&mut room, 2, 2);
         let t0 = start(&mut room, 0);
-        // 1라운드: 반지름 7100 밖(필드 모서리 너머)에 세우면 초당 1%
-        place(&mut room, 1, 6000.0, 5000.0);
+        // 1라운드: 반지름 355m 밖(필드 모서리 너머)에 세우면 초당 1%
+        place(&mut room, 1, 30000.0, 25000.0);
         room.next_zone_damage_ms = 0;
         room.update_match(t0 + 100);
         assert_eq!((member(&room, 1).hp, member(&room, 2).hp), (MAX_HP - 1.0, MAX_HP));
         // 4라운드: 둘 다 밖, 같은 피해 틱에 동시에 죽으면 무승부
         let round4 = t0 + 3 * 1000 + 3 * 500 + 500;
         for id in [1, 2] {
-            place(&mut room, id, 1500.0, 0.0);
+            place(&mut room, id, 4500.0, 0.0); // 4라운드 절반: 반지름 60m → 30m
             let index = room.find(id).unwrap();
             room.members[index].hp = 5.0;
         }

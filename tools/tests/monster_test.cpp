@@ -147,15 +147,15 @@ int main(int argc, char** argv)
         Check(Find(field, id)->phase == MonsterState::Recover, "charger_recovers_after_dash");
     }
 
-    // ---- 돌진은 벽에서 멈춘다: 동쪽 경계벽(x=5000)을 향해(캠프 화로 (4660, 0)을 피한 줄) ----
+    // ---- 돌진은 벽에서 멈춘다: 동쪽 경계벽(x=25000)을 향해 ----
     {
         MonsterField field(&*map, 1, 0);
         field.SetSpawning(false);
         std::uint32_t now = 1000;
-        const std::uint16_t id = field.SpawnAt(1, 4650.f, 600.f, now).id;
+        const std::uint16_t id = field.SpawnAt(1, 24650.f, 0.f, now).id;
         float maxX = 0.f;
-        Run(field, now, 1.6f, {{1, 4940.f, 600.f, true}}, [&](auto, auto&) { maxX = std::max(maxX, Find(field, id)->x); });
-        Check(maxX <= 5000.f - T::kRadius + .5f && maxX > 4900.f, "charger_stops_at_wall");
+        Run(field, now, 1.6f, {{1, 24940.f, 0.f, true}}, [&](auto, auto&) { maxX = std::max(maxX, Find(field, id)->x); });
+        Check(maxX <= 25000.f - T::kRadius + .5f && maxX > 24900.f, "charger_stops_at_wall");
     }
 
     // ---- 피격: 넉백 30cm(피해 20), 경직 0.16초, 예고 취소, 0.35초 안에는 다시 경직되지 않음 ----
@@ -212,11 +212,11 @@ int main(int argc, char** argv)
         MonsterField field(&*map, 1, 0);
         field.SetSpawning(false);
         std::uint32_t now = 1000;
-        const std::uint16_t id = field.SpawnAt(0, 5000.f - T::kRadius - 5.f, 0.f, now).id;
+        const std::uint16_t id = field.SpawnAt(0, 25000.f - T::kRadius - 5.f, 0.f, now).id;
         MonsterEvents events;
         field.Damage(id, 1, 40.f, 1.f, 0.f, now, events);
         Run(field, now, .2f, {}, [](auto, auto&) {});
-        Check(Find(field, id)->x <= 5000.f - T::kRadius + .01f, "knockback_blocked_by_wall");
+        Check(Find(field, id)->x <= 25000.f - T::kRadius + .01f, "knockback_blocked_by_wall");
     }
 
     // ---- 검기: 일반은 가장 가까운 한 마리만, 충전은 가까운 순서로 한 번씩 관통 ----
@@ -281,7 +281,7 @@ int main(int argc, char** argv)
                 for (int i = 0; i < 10; ++i) field.Damage(field.Monsters().front().id, 1, 1000.f, 0.f, 0.f, t, scratch);
                 known = field.Monsters().size();
             }
-            for (const Monster& m : monsters) spawnOk &= Clearance(m.x, m.y) > T::kRadius - 1.f && std::abs(m.x) <= 5000.f && std::abs(m.y) <= 5000.f;
+            for (const Monster& m : monsters) spawnOk &= Clearance(m.x, m.y) > T::kRadius - 1.f && std::abs(m.x) <= 25000.f && std::abs(m.y) <= 25000.f;
         });
         std::println("  증원: 최대 {}마리, {}초에 상한 도달, 누적 생성 {}", maxCount, capAtMs / 1000.f, field.TotalSpawned());
         Check(maxCount == proto::kMaxMonsters && capAtMs > 0 && capAtMs < 45000, "spawns_up_to_cap_48_and_stops");

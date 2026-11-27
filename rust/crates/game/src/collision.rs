@@ -212,7 +212,8 @@ impl CollisionMap {
     /// 캡슐 중심이 반지름 `radius` 원으로 오를 수 없는 장애물과 겹치는가(머리 위 구조물·낮은 받침 제외).
     pub fn blocked(&self, center: Vec3, radius: f32) -> bool {
         let (p, z) = (flat(center), center.z);
-        self.obstacles.iter().enumerate().any(|(index, o)| o.relevant(z) && self.distance(index, p) < radius)
+        // 경계 상자 밖은 거리가 반지름보다 멀다(결과는 같고 큰 맵에서 빠르다)
+        self.obstacles.iter().enumerate().any(|(index, o)| !o.outside_bounds(p, radius) && o.relevant(z) && self.distance(index, p) < radius)
     }
 
     /// `from` → `to`로 반지름 `radius` 원을 밀었을 때 장애물에 걸리는가.
@@ -231,7 +232,11 @@ impl CollisionMap {
     pub fn line_blocked(&self, from: Vec3, to: Vec3) -> bool {
         let z = { from.z }.max(to.z);
         let (a, b) = (flat(from), flat(to));
-        self.obstacles.iter().enumerate().any(|(index, o)| o.relevant(z) && self.segment_hits(index, a, b))
+        let (min_x, max_x, min_y, max_y) = (a.x.min(b.x), a.x.max(b.x), a.y.min(b.y), a.y.max(b.y));
+        self.obstacles.iter().enumerate().any(|(index, o)| {
+            // 선분의 경계 상자와 겹치지 않는 장애물은 맞을 수 없다
+            !(o.max_x < min_x || o.min_x > max_x || o.max_y < min_y || o.min_y > max_y) && o.relevant(z) && self.segment_hits(index, a, b)
+        })
     }
 }
 

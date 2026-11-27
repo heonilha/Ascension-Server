@@ -1,6 +1,6 @@
 //! ascension-server [--port 7777] [--threads N] [--map data/CombatLab.txt]
 //!                  [--match-monsters 1] [--match-time-scale 1] [--match-rift-time-scale 1] [--match-start-teams 2] [--match-xp-scale 1]
-//!                  [--practice-monsters 1] [--practice-slam-ms 0]
+//!                  [--match-base-radius 16000] [--practice-monsters 1] [--practice-slam-ms 0]
 //!   --match-monsters: 매치에 서버 몬스터를 둔다(기본 켬). 0이면 플레이어끼리만
 //!   --match-time-scale: 매치 시간표(기본 36분)의 모든 시간에 곱한다. 0.1이면 약 3.6분 판(데모·시험용)
 //!   --match-rift-time-scale: 균열(대결 3분·보스전 4분·대기 1분·균열 안 부활 20초)에만 따로 곱한다. 기본은 --match-time-scale과 같다.
@@ -9,6 +9,7 @@
 //!   --match-xp-scale: 처치 경험치 배율(기본 1). 시간을 줄인 데모에서 레벨을 같은 속도로 올리려면 1 / 시간 배율
 //!   --practice-monsters: 연습 방(개발 시험용)에 서버 몬스터를 둔다(기본 켬). 0이면 빈 방
 //!   --practice-slam-ms: 연습 방에서 이 주기로 서버 내려찍기 시험 패턴을 낸다(회피 판정 시험용, 기본 끔)
+//!   --match-base-radius: 팀 기지 원의 반지름(cm, 기본 16000 = 맵의 기지 자리). 봇 시험이 두 팀을 가까이 세울 때만 쓴다
 //!   --map: 충돌 지형 파일. 기본값은 현재 폴더나 실행 파일 위쪽 폴더에서 찾는다. none이면 지형 검사를 끈다
 //!   (예전 이름 --pve-monsters, --pve-slam-ms도 받는다)
 
@@ -39,6 +40,7 @@ fn run() -> ExitCode {
         schedule: MatchSchedule::default(),
         xp_scale: 1.0,
         map: None,
+        base_radius: None,
     };
     let mut time_scale = 1.0f32;
     let mut rift_time_scale: Option<f32> = None;
@@ -58,6 +60,7 @@ fn run() -> ExitCode {
             "--match-rift-time-scale" => rift_time_scale = value.parse().ok(),
             "--match-start-teams" => start_teams = value.parse().unwrap_or(start_teams),
             "--match-xp-scale" => options.xp_scale = value.parse().unwrap_or(1.0),
+            "--match-base-radius" => options.base_radius = value.parse().ok(),
             "--map" => map_path = (value != "none").then(|| PathBuf::from(value)),
             _ => {}
         }
