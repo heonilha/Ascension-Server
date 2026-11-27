@@ -12,15 +12,19 @@ use bytemuck::{Pod, Zeroable};
 #[cfg(not(target_endian = "little"))]
 compile_error!("프로토콜은 리틀 엔디언 전용이다.");
 
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 pub const MAX_PACKET_SIZE: u16 = 4096;
 /// UTF-8, 널 문자 포함
 pub const NAME_LENGTH: usize = 32;
-/// PvE 층 인스턴스 최대 인원(팀원 수)
-pub const MAX_ROOM_PLAYERS: u8 = 3;
-/// PvP 스테이지 최대 인원
-pub const MAX_PVP_PLAYERS: u8 = 16;
-/// PvE 층 하나의 최대 몬스터 수
+/// 연습 방 최대 인원
+pub const MAX_PRACTICE_PLAYERS: u8 = 3;
+/// 매치 하나의 최대 팀 수(팀 번호 1~4)
+pub const MAX_TEAMS: u8 = 4;
+/// 팀 하나의 최대 인원
+pub const MAX_TEAM_PLAYERS: u8 = 3;
+/// 매치 최대 인원(12)
+pub const MAX_MATCH_PLAYERS: u8 = MAX_TEAMS * MAX_TEAM_PLAYERS;
+/// 방 하나의 최대 몬스터 수
 pub const MAX_MONSTERS: u8 = 48;
 pub const DEFAULT_PORT: u16 = 7777;
 /// 서버 틱 20Hz. `SMoveBatch::server_tick` × 이 값 = 서버 시간
@@ -75,32 +79,34 @@ wire_enum! {
         SWaveEnd = 22,
         CRespawn = 23,
         SRespawn = 24,
+        SMatchState = 25,
+        SPlayerDied = 26,
     }
 }
 
 wire_enum! {
     /// 방 종류. 같은 teamCode라도 모드가 다르면 다른 방이다.
     RoomMode: u8 {
-        /// 협동 층 인스턴스(최대 3명)
-        PvE = 0,
-        /// 대전 스테이지(최대 16명)
-        PvP = 1,
+        /// 개발 시험용 연습 방(최대 3명, 같은 편). 게임 기획에는 없다. 회피·몬스터 판정 시험에 쓴다
+        Practice = 0,
+        /// 배틀로얄 한 판(최대 4팀 × 3명). 몬스터 사냥 + 팀 간 전투 + 라운드·자기장
+        Match = 1,
     }
 }
 
 wire_enum! {
     AttackKind: u8 {
-        /// 서버가 내는 범위 공격(PvE 내려찍기 시험 패턴, 이후 수문장 패턴)
+        /// 서버가 내는 범위 공격(연습 방 내려찍기 시험 패턴)
         Slam = 1,
-        /// 플레이어 근접 공격(PvP)
+        /// 플레이어 근접 공격(매치: 다른 팀 플레이어를 친다)
         Slash = 2,
         /// 몬스터 부채꼴 베기
         MonsterArc = 3,
         /// 폭주 망령 돌진
         MonsterCharge = 4,
-        /// 플레이어 일반 검기(PvE)
+        /// 플레이어 일반 검기. 몬스터를 친다
         Wave = 5,
-        /// 플레이어 충전 검기(PvE). charge 0~1
+        /// 플레이어 충전 검기. charge 0~1
         HeavyWave = 6,
     }
 }
@@ -140,6 +146,36 @@ wire_enum! {
         NotLoggedIn = 2,
         AlreadyInRoom = 3,
         InvalidMode = 4,
+        /// 매치: 그 팀이 이미 3명
+        TeamFull = 5,
+        /// 매치: 팀 번호가 1~4가 아님
+        InvalidTeam = 6,
+    }
+}
+
+wire_enum! {
+    /// 매치 진행 단계. `SMatchState`로 알린다.
+    MatchPhase: u8 {
+        /// 팀이 모자라 시작 대기
+        Waiting = 0,
+        /// 시작까지 카운트다운
+        Countdown = 1,
+        /// 라운드 진행(자기장 고정, 4라운드는 계속 축소)
+        Round = 2,
+        /// 라운드 사이 자기장 축소
+        Shrink = 3,
+        /// 최후의 1팀 결정. 잠시 뒤 Waiting으로 돌아간다
+        Ended = 4,
+    }
+}
+
+wire_enum! {
+    /// 사망 원인
+    DeathCause: u8 {
+        Player = 0,
+        Monster = 1,
+        /// 자기장
+        Zone = 2,
     }
 }
 
@@ -202,11 +238,13 @@ wire_struct! {
 }
 
 wire_struct! {
-    PlayerInfo [52] {
+    PlayerInfo [53] {
         player_id: u32,
         name: [u8; NAME_LENGTH],
         position: Vec3,
         yaw: f32,
+        /// 매치 팀 번호 1~4. 연습 방은 0
+        team: u8,
     }
 }
 
@@ -296,13 +334,16 @@ packet! {
     }
 }
 
-// ---- 층 인스턴스(방) ----
+// ---- 방 ----
 packet! {
-    /// 같은 모드·teamCode를 보낸 플레이어끼리 같은 방에 들어간다.
-    CEnterRoom [9] {
+    /// 같은 모드·teamCode를 보낸 플레이어끼리 같은 방에 들어간다. 매치에서 teamCode는 "판 번호"이고,
+    /// 소속 팀은 `team`(1~4)으로 고른다. 같은 팀끼리는 서로 공격이 맞지 않는다.
+    CEnterRoom [10] {
         team_code: u32,
         /// `RoomMode` 값
         mode: u8,
+        /// 매치: 1~4. 연습 방은 무시
+        team: u8,
     }
 }
 
@@ -326,7 +367,7 @@ packet! {
 }
 
 packet! {
-    SPlayerJoined [56] { player: PlayerInfo }
+    SPlayerJoined [57] { player: PlayerInfo }
 }
 
 packet! {
@@ -428,7 +469,7 @@ packet! {
     SAttackCancel [8] { attack_id: u32 }
 }
 
-// ---- 몬스터 (P1: 서버 권한, PvE 방) ----
+// ---- 몬스터 (서버 권한) ----
 packet! {
     /// 뒤에 `MonsterEntry[count]`가 붙는다. 살아 있는 몬스터 전부를 서버 틱마다 보낸다.
     SMonsterBatch [9] {
@@ -488,8 +529,47 @@ packet! {
     }
 }
 
+// ---- 매치 진행 ----
 packet! {
-    /// 공격 범위 안에 있던 플레이어 한 명의 판정 결과.
+    /// 단계가 바뀔 때, 남은 팀 수가 바뀔 때, 입장했을 때, 그리고 2초마다 보낸다.
+    /// 자기장 반지름은 [phase_start_server_ms, phase_end_server_ms] 동안 zone_radius_from → zone_radius_to로 일정하게 줄어든다.
+    SMatchState [37] {
+        /// `MatchPhase` 값
+        phase: u8,
+        /// 1~4. 시작 전 0
+        round: u8,
+        phase_start_server_ms: u32,
+        /// 0 = 끝 시각 없음
+        phase_end_server_ms: u32,
+        zone_x: f32,
+        zone_y: f32,
+        zone_radius_from: f32,
+        zone_radius_to: f32,
+        /// 자기장 밖 피해: 초당 최대 체력의 이 퍼센트(0 = 피해 없음)
+        zone_damage_percent: f32,
+        teams_alive: u8,
+        /// Ended일 때 이긴 팀(0 = 없음)
+        winner_team: u8,
+        /// 1 = 지금 죽으면 부활한다(1~3라운드), 0 = 탈락
+        respawn_allowed: u8,
+    }
+}
+
+packet! {
+    /// 플레이어가 죽었다. 방 전체에 보낸다.
+    SPlayerDied [17] {
+        player_id: u32,
+        /// cause가 Player일 때 죽인 플레이어
+        killer_id: u32,
+        /// `DeathCause` 값
+        cause: u8,
+        /// 이 시각에 부활한다. 0 = 탈락
+        respawn_server_ms: u32,
+    }
+}
+
+packet! {
+    /// 공격 범위 안에 있던 플레이어 한 명의 판정 결과. attack_id 0 = 자기장 피해(1초마다).
     SHitResult [31] {
         attack_id: u32,
         target_id: u32,
@@ -660,8 +740,9 @@ mod tests {
     #[test]
     fn unknown_enum_values_are_rejected() {
         assert_eq!(PacketId::from_raw(7), None);
-        assert_eq!(PacketId::from_raw(25), None);
+        assert_eq!(PacketId::from_raw(27), None);
         assert_eq!(RoomMode::from_raw(2), None);
+        assert_eq!(MatchPhase::from_raw(5), None);
         assert_eq!(AttackKind::from_raw(0), None);
     }
 

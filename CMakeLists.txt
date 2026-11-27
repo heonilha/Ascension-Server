@@ -35,12 +35,9 @@ endif()
 add_library(ascension_protocol INTERFACE)
 target_include_directories(ascension_protocol INTERFACE protocol)
 
-# ---- 서버 코어 ----
+# ---- 공용 C++ 게임 코드 (봇·기준 기록 도구가 쓴다) ----
+# 서버 본체는 Rust(rust/)로 옮겼다. 여기 남은 충돌 지형·몬스터 C++ 원본은 Rust 계산과 비교하는 기준 기록을 만든다.
 add_library(ascension_core STATIC
-    src/net/Session.cpp
-    src/net/Server.cpp
-    src/game/Room.cpp
-    src/game/RoomManager.cpp
     src/game/CollisionMap.cpp
     src/game/Monsters.cpp)
 target_include_directories(ascension_core PUBLIC src)
@@ -51,9 +48,6 @@ if(MSVC)
 else()
     target_compile_options(ascension_core PUBLIC -Wall -Wextra -Wpedantic)
 endif()
-
-add_executable(ascension_server src/main.cpp)
-target_link_libraries(ascension_server PRIVATE ascension_core)
 
 # ---- 도구: 봇 클라이언트 ----
 add_executable(ascension_bot tools/bot/main.cpp)

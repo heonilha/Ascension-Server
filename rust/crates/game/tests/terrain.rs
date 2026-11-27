@@ -3,9 +3,9 @@
 //!
 //! 좌표는 클라이언트 Scripts/CreateMap.py의 배치에서 가져왔다. 캡슐 중심 높이 92(바닥 z=0에 선 주인공).
 
-use asc_game::room_layout::{spawn_position, TERRAIN_RADIUS as R, TERRAIN_SWEEP_RADIUS as SWEEP};
+use asc_game::room_layout::{practice_spawn_position, team_spawn_position, TERRAIN_RADIUS as R, TERRAIN_SWEEP_RADIUS as SWEEP};
 use asc_game::CollisionMap;
-use asc_protocol::{RoomMode, Vec3, MAX_PVP_PLAYERS, MAX_ROOM_PLAYERS};
+use asc_protocol::{Vec3, MAX_PRACTICE_PLAYERS, MAX_TEAMS, MAX_TEAM_PLAYERS};
 use std::path::Path;
 
 fn load() -> CollisionMap {
@@ -82,12 +82,14 @@ fn line_of_sight() {
 fn all_spawns_free() {
     let map = load();
     // 시작 위치: 실제 캡슐 반지름(32)으로도 막히지 않아야 한다
-    for slot in 0..MAX_ROOM_PLAYERS as usize {
-        assert!(!map.blocked(spawn_position(RoomMode::PvE, slot), 32.0), "PvE slot {slot}");
+    for slot in 0..MAX_PRACTICE_PLAYERS as usize {
+        assert!(!map.blocked(practice_spawn_position(slot), 32.0), "practice slot {slot}");
     }
-    for slot in 0..MAX_PVP_PLAYERS as usize {
-        let mut p = spawn_position(RoomMode::PvP, slot);
-        p.z = 92.0;
-        assert!(!map.blocked(p, 32.0), "PvP slot {slot}");
+    for team in 1..=MAX_TEAMS {
+        for member in 0..MAX_TEAM_PLAYERS as usize {
+            let mut p = team_spawn_position(team, member);
+            p.z = 92.0;
+            assert!(!map.blocked(p, 32.0), "team {team} member {member}");
+        }
     }
 }

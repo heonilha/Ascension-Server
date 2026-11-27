@@ -15,12 +15,14 @@
 
 namespace asc::proto
 {
-    inline constexpr std::uint16_t kVersion = 4;
+    inline constexpr std::uint16_t kVersion = 5;
     inline constexpr std::uint16_t kMaxPacketSize = 4096;
     inline constexpr std::size_t kNameLength = 32;     // UTF-8, 널 문자 포함
-    inline constexpr std::uint8_t kMaxRoomPlayers = 3; // PvE 층 인스턴스 최대 인원(팀원 수)
-    inline constexpr std::uint8_t kMaxPvpPlayers = 16; // PvP 스테이지 최대 인원
-    inline constexpr std::uint8_t kMaxMonsters = 48;   // PvE 층 하나의 최대 몬스터 수
+    inline constexpr std::uint8_t kMaxPracticePlayers = 3; // 연습 방 최대 인원
+    inline constexpr std::uint8_t kMaxTeams = 4;           // 매치 하나의 최대 팀 수(팀 번호 1~4)
+    inline constexpr std::uint8_t kMaxTeamPlayers = 3;     // 팀 하나의 최대 인원
+    inline constexpr std::uint8_t kMaxMatchPlayers = kMaxTeams * kMaxTeamPlayers; // 매치 최대 인원(12)
+    inline constexpr std::uint8_t kMaxMonsters = 48;       // 방 하나의 최대 몬스터 수
     inline constexpr std::uint16_t kDefaultPort = 7777;
     inline constexpr std::uint32_t kServerTickMs = 50; // 서버 틱 20Hz. S_MoveBatch.serverTick × 이 값 = 서버 시간
 
@@ -49,23 +51,25 @@ namespace asc::proto
         S_WaveEnd = 22,
         C_Respawn = 23,
         S_Respawn = 24,
+        S_MatchState = 25,
+        S_PlayerDied = 26,
     };
 
     // 방 종류. 같은 teamCode라도 모드가 다르면 다른 방이다.
     enum class RoomMode : std::uint8_t
     {
-        PvE = 0, // 협동 층 인스턴스(최대 3명)
-        PvP = 1, // 대전 스테이지(최대 16명)
+        Practice = 0, // 개발 시험용 연습 방(최대 3명, 같은 편). 게임 기획에는 없다. 회피·몬스터 판정 시험에 쓴다
+        Match = 1,    // 배틀로얄 한 판(최대 4팀 × 3명). 몬스터 사냥 + 팀 간 전투 + 라운드·자기장
     };
 
     enum class AttackKind : std::uint8_t
     {
-        Slam = 1,  // 서버가 내는 범위 공격(PvE 내려찍기 시험 패턴, 이후 수문장 패턴)
-        Slash = 2, // 플레이어 근접 공격(PvP)
+        Slam = 1,  // 서버가 내는 범위 공격(연습 방 내려찍기 시험 패턴)
+        Slash = 2, // 플레이어 근접 공격(매치: 다른 팀 플레이어를 친다)
         MonsterArc = 3,    // 몬스터 부채꼴 베기(center에서 yaw 방향, 반지름 radius, 반각 halfAngle)
         MonsterCharge = 4, // 폭주 망령 돌진(center에서 yaw 방향 직선, hitServerMs에 출발)
-        Wave = 5,          // 플레이어 일반 검기(C_Attack, PvE)
-        HeavyWave = 6,     // 플레이어 충전 검기(C_Attack, PvE). charge 0~1
+        Wave = 5,          // 플레이어 일반 검기(C_Attack). 몬스터를 친다
+        HeavyWave = 6,     // 플레이어 충전 검기(C_Attack). charge 0~1
     };
 
     enum class HitResult : std::uint8_t
@@ -99,6 +103,26 @@ namespace asc::proto
         NotLoggedIn = 2,
         AlreadyInRoom = 3,
         InvalidMode = 4,
+        TeamFull = 5,    // 매치: 그 팀이 이미 3명
+        InvalidTeam = 6, // 매치: 팀 번호가 1~4가 아님
+    };
+
+    // 매치 진행 단계. S_MatchState로 알린다.
+    enum class MatchPhase : std::uint8_t
+    {
+        Waiting = 0,   // 팀이 모자라 시작 대기
+        Countdown = 1, // 시작까지 카운트다운
+        Round = 2,     // 라운드 진행(자기장 고정, 4라운드는 계속 축소)
+        Shrink = 3,    // 라운드 사이 자기장 축소
+        Ended = 4,     // 최후의 1팀 결정. 잠시 뒤 Waiting으로 돌아간다
+    };
+
+    // 사망 원인
+    enum class DeathCause : std::uint8_t
+    {
+        Player = 0,
+        Monster = 1,
+        Zone = 2, // 자기장
     };
 
 #pragma pack(push, 1)
@@ -119,6 +143,7 @@ namespace asc::proto
         char name[kNameLength];
         Vec3 position;
         float yaw;
+        std::uint8_t team; // 매치 팀 번호 1~4. 연습 방은 0
     };
 
     struct MoveEntry
@@ -155,13 +180,15 @@ namespace asc::proto
         std::uint16_t attackWindupMs;  // 플레이어 공격 입력 → 서버 명중 시각까지(PvP)
     };
 
-    // ---- 층 인스턴스(방) ----
-    // 같은 모드·teamCode를 보낸 플레이어끼리 같은 방에 들어간다.
+    // ---- 방 ----
+    // 같은 모드·teamCode를 보낸 플레이어끼리 같은 방에 들어간다. 매치에서 teamCode는 "판 번호"이고,
+    // 소속 팀은 team(1~4)으로 고른다. 같은 팀끼리는 서로 공격이 맞지 않는다.
     struct C_EnterRoom
     {
         PacketHeader header;
         std::uint32_t teamCode;
         RoomMode mode;
+        std::uint8_t team; // 매치: 1~4. 연습 방은 무시
     };
 
     // 뒤에 PlayerInfo[count]가 붙는다: 이미 방에 있던 다른 플레이어들.
@@ -299,7 +326,7 @@ namespace asc::proto
         std::uint32_t attackId;
     };
 
-    // ---- 몬스터 (P1: 서버 권한, PvE 방) ----
+    // ---- 몬스터 (서버 권한) ----
     enum class MonsterState : std::uint8_t
     {
         Idle = 0,    // 노릴 플레이어가 없다
@@ -369,7 +396,8 @@ namespace asc::proto
         PacketHeader header;
     };
 
-    // 부활: 시작 위치로 옮기고 HP를 채운다. 방 전체에 보낸다.
+    // 부활: 위치를 옮기고 HP를 채운다. 방 전체에 보낸다.
+    // 매치에서는 서버가 부활 대기(1라운드 10초 / 2라운드 20초 / 3라운드 30초)가 끝나면 자기장 안 안전한 곳에서 스스로 부활시킨다(C_Respawn 무시).
     struct S_Respawn
     {
         PacketHeader header;
@@ -378,7 +406,36 @@ namespace asc::proto
         float hp;
     };
 
+    // ---- 매치 진행 ----
+    // 단계가 바뀔 때, 남은 팀 수가 바뀔 때, 입장했을 때, 그리고 2초마다 보낸다.
+    // 자기장 반지름은 [phaseStartServerMs, phaseEndServerMs] 동안 zoneRadiusFrom → zoneRadiusTo로 일정하게 줄어든다(같으면 고정).
+    struct S_MatchState
+    {
+        PacketHeader header;
+        MatchPhase phase;
+        std::uint8_t round;              // 1~4. 시작 전 0
+        std::uint32_t phaseStartServerMs;
+        std::uint32_t phaseEndServerMs;  // 0 = 끝 시각 없음(대기·4라운드 축소 완료 뒤)
+        float zoneX, zoneY;              // 자기장 중심
+        float zoneRadiusFrom, zoneRadiusTo;
+        float zoneDamagePercent;         // 자기장 밖 피해: 초당 최대 체력의 이 퍼센트(0 = 피해 없음)
+        std::uint8_t teamsAlive;         // 탈락하지 않은 팀 수
+        std::uint8_t winnerTeam;         // Ended일 때 이긴 팀(0 = 없음)
+        std::uint8_t respawnAllowed;     // 1 = 지금 죽으면 부활한다(1~3라운드), 0 = 탈락(4라운드)
+    };
+
+    // 플레이어가 죽었다. 방 전체에 보낸다.
+    struct S_PlayerDied
+    {
+        PacketHeader header;
+        std::uint32_t playerId;
+        std::uint32_t killerId;          // cause가 Player일 때 죽인 플레이어
+        DeathCause cause;
+        std::uint32_t respawnServerMs;   // 이 시각에 부활한다. 0 = 탈락(다시 부활하지 않음)
+    };
+
     // 공격 범위 안에 있던 플레이어 한 명의 판정 결과. 방 전체에 보낸다.
+    // attackId 0 = 자기장 피해(1초마다).
     struct S_HitResult
     {
         PacketHeader header;
@@ -396,14 +453,14 @@ namespace asc::proto
     // 두 컴파일러의 배치가 같은지 컴파일 시간에 확인한다.
     static_assert(sizeof(PacketHeader) == 4);
     static_assert(sizeof(Vec3) == 12);
-    static_assert(sizeof(PlayerInfo) == 52);
+    static_assert(sizeof(PlayerInfo) == 53);
     static_assert(sizeof(MoveEntry) == 33);
     static_assert(sizeof(C_Login) == 38);
     static_assert(sizeof(S_Login) == 11);
     static_assert(sizeof(ModeRules) == 8);
-    static_assert(sizeof(C_EnterRoom) == 9);
+    static_assert(sizeof(C_EnterRoom) == 10);
     static_assert(sizeof(S_EnterRoom) == 42);
-    static_assert(sizeof(S_PlayerJoined) == 56);
+    static_assert(sizeof(S_PlayerJoined) == 57);
     static_assert(sizeof(S_PlayerLeft) == 8);
     static_assert(sizeof(InputCommand) == 17);
     static_assert(sizeof(C_Input) == 14);
@@ -424,6 +481,8 @@ namespace asc::proto
     static_assert(sizeof(C_Respawn) == 4);
     static_assert(sizeof(S_Respawn) == 24);
     static_assert(sizeof(S_HitResult) == 31);
+    static_assert(sizeof(S_MatchState) == 37);
+    static_assert(sizeof(S_PlayerDied) == 17);
 
     // 패킷 타입 → PacketId
     template <class T> struct IdOf;
@@ -449,6 +508,8 @@ namespace asc::proto
     template <> struct IdOf<C_Attack> { static constexpr PacketId value = PacketId::C_Attack; };
     template <> struct IdOf<S_AttackStart> { static constexpr PacketId value = PacketId::S_AttackStart; };
     template <> struct IdOf<S_HitResult> { static constexpr PacketId value = PacketId::S_HitResult; };
+    template <> struct IdOf<S_MatchState> { static constexpr PacketId value = PacketId::S_MatchState; };
+    template <> struct IdOf<S_PlayerDied> { static constexpr PacketId value = PacketId::S_PlayerDied; };
 
     // 헤더가 채워진 빈 패킷을 만든다. 예: auto p = Make<C_Login>();
     template <class T>

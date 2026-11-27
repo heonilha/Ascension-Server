@@ -1,22 +1,24 @@
-# Run every automated check: unit tests (terrain, monsters), Rust port checks + bot scenarios against two private test servers.
-# Rust port: the C++ build writes golden records (movement; collision map + monsters), which must equal the committed
-# ones; then "cargo test" checks that the Rust crates (rust\) reproduce them bit for bit. SKIP line if cargo is missing.
-# Server A (-Port): PvE rooms are empty except for a timed slam pattern, so dodge timing checks stay exact.
-# Server B (-Port + 1): PvE rooms have server monsters (spawning, chasing, attacking).
+﻿# Run every automated check against the Rust server (rust\target\release\ascension-server.exe):
+# C++ unit tests (terrain, monsters), golden records, "cargo test" (Rust unit + match tests), and C++ bot scenarios
+# against two private test servers.
+# Golden records: the C++ tools write them (movement; collision map + monsters) and they must equal the committed
+# ones; "cargo test" then checks that the Rust crates reproduce them bit for bit.
+# Server A (-Port): practice rooms are empty except for a timed slam pattern, and matches have no monsters and never
+#   start (they stay in Waiting), so dodge timing checks stay exact.
+# Server B (-Port + 1): practice rooms have server monsters (spawning, chasing, attacking).
 #   .\Scripts\Test.ps1               # builds first, prints one PASS/FAIL line per scenario (about 50 s)
 #   .\Scripts\Test.ps1 -NoBuild
-#   .\Scripts\Test.ps1 -Rust         # same bot scenarios against the Rust server (rust\target\release\ascension-server.exe)
 #   .\Scripts\Test.ps1 -UpdateGolden # after changing movement or game rules on purpose: rewrite the committed records
 # Logs: build\windows\test-logs\<scenario>.log and server.log. Exit code 1 if anything failed.
 # Scenarios run in parallel, each in its own rooms (distinct --team-base).
 param(
     [int]$Port = 17777,
     [switch]$NoBuild,
-    [switch]$UpdateGolden,
-    [switch]$Rust
+    [switch]$UpdateGolden
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw 'cargo not found: install Rust from https://rustup.rs' }
 if (-not $NoBuild) { & (Join-Path $PSScriptRoot 'Build.ps1') }
 $bin = Join-Path $root 'build\windows\bin'
 $logs = Join-Path $root 'build\windows\test-logs'
@@ -32,21 +34,21 @@ $scenarios = [ordered]@{
     'move_wall'       = '--bots 1 --wall --seconds 6 --team-base 500'
     'move_lat100'     = '--bots 3 --seconds 6 --latency 100 --team-base 600'
     'move_lat300'     = '--bots 3 --seconds 6 --latency 300 --team-base 700'
-    # dodge judgement, PvE (server slam pattern) at one-way latencies
-    'pve_dodge_L0'    = '--dodge-test --bots 1 --seconds 14 --latency 0 --team-base 1000'
-    'pve_dodge_L40'   = '--dodge-test --bots 1 --seconds 14 --latency 40 --team-base 1001'
-    'pve_dodge_L100'  = '--dodge-test --bots 1 --seconds 14 --latency 100 --team-base 1002'
-    'pve_dodge_L150'  = '--dodge-test --bots 1 --seconds 14 --latency 150 --team-base 1003'
-    'pve_dodge_L300'  = '--dodge-test --bots 1 --seconds 14 --latency 300 --team-base 1004'
-    'pve_stamp_cheat' = '--dodge-test --dodge-cheat --bots 1 --seconds 16 --team-base 1005'
-    'pve_rtt_lie'     = '--dodge-test --dodge-cheat --rtt-lie 2000 --bots 1 --seconds 16 --team-base 1006'
-    # dodge judgement, PvP (bot 0 attacks bot 1)
-    'pvp_dodge_L0'    = '--mode pvp --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 0 --team-base 1100'
-    'pvp_dodge_L50'   = '--mode pvp --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 50 --team-base 1101'
-    'pvp_dodge_L100'  = '--mode pvp --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 100 --team-base 1102'
-    'pvp_dodge_L150'  = '--mode pvp --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 150 --team-base 1103'
-    'pvp_stamp_cheat' = '--mode pvp --dodge-test --dodge-cheat --bots 2 --team-size 2 --seconds 16 --team-base 1104'
-    'pvp_rtt_lie'     = '--mode pvp --dodge-test --dodge-cheat --rtt-lie 2000 --bots 2 --team-size 2 --seconds 16 --team-base 1105'
+    # dodge judgement, practice room (server slam pattern) at one-way latencies
+    'practice_dodge_L0'    = '--dodge-test --bots 1 --seconds 14 --latency 0 --team-base 1000'
+    'practice_dodge_L40'   = '--dodge-test --bots 1 --seconds 14 --latency 40 --team-base 1001'
+    'practice_dodge_L100'  = '--dodge-test --bots 1 --seconds 14 --latency 100 --team-base 1002'
+    'practice_dodge_L150'  = '--dodge-test --bots 1 --seconds 14 --latency 150 --team-base 1003'
+    'practice_dodge_L300'  = '--dodge-test --bots 1 --seconds 14 --latency 300 --team-base 1004'
+    'practice_stamp_cheat' = '--dodge-test --dodge-cheat --bots 1 --seconds 16 --team-base 1005'
+    'practice_rtt_lie'     = '--dodge-test --dodge-cheat --rtt-lie 2000 --bots 1 --seconds 16 --team-base 1006'
+    # dodge judgement, match (bot 0 attacks bot 1, different teams)
+    'match_dodge_L0'    = '--mode match --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 0 --team-base 1100'
+    'match_dodge_L50'   = '--mode match --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 50 --team-base 1101'
+    'match_dodge_L100'  = '--mode match --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 100 --team-base 1102'
+    'match_dodge_L150'  = '--mode match --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 150 --team-base 1103'
+    'match_stamp_cheat' = '--mode match --dodge-test --dodge-cheat --bots 2 --team-size 2 --seconds 16 --team-base 1104'
+    'match_rtt_lie'     = '--mode match --dodge-test --dodge-cheat --rtt-lie 2000 --bots 2 --team-size 2 --seconds 16 --team-base 1105'
 }
 # Monster scenarios run against server B.
 $monsterScenarios = [ordered]@{
@@ -57,19 +59,14 @@ $monsterScenarios = [ordered]@{
     'mon_hunt_lat150' = '--hunt --bots 1 --seconds 20 --latency 150 --team-base 2400'
 }
 
-# The bot (C++) is the same either way; -Rust only swaps the server it talks to.
-$serverExe = Join-Path $bin 'ascension_server.exe'
-if ($Rust) {
-    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw 'cargo not found: install Rust from https://rustup.rs' }
-    $serverExe = Join-Path $root 'rust\target\release\ascension-server.exe'
-    if (-not $NoBuild) {
-        $manifest = Join-Path $root 'rust\Cargo.toml'
-        $buildLog = Join-Path $logs 'rust_build.log'
-        cmd /c "cargo build --release -p asc-server --manifest-path `"$manifest`" > `"$buildLog`" 2>&1"
-        if ($LASTEXITCODE -ne 0) { throw "Rust server build failed. See $buildLog" }
-    }
-    if (-not (Test-Path $serverExe)) { throw "Rust server not built: $serverExe" }
+$serverExe = Join-Path $root 'rust\target\release\ascension-server.exe'
+if (-not $NoBuild) {
+    $manifest = Join-Path $root 'rust\Cargo.toml'
+    $buildLog = Join-Path $logs 'rust_build.log'
+    cmd /c "cargo build --release -p asc-server --manifest-path `"$manifest`" > `"$buildLog`" 2>&1"
+    if ($LASTEXITCODE -ne 0) { throw "Rust server build failed. See $buildLog" }
 }
+if (-not (Test-Path $serverExe)) { throw "Rust server not built: $serverExe" }
 Write-Host "Server under test: $serverExe"
 
 [Console]::OutputEncoding = [Text.Encoding]::UTF8 # unit test output is UTF-8
@@ -87,8 +84,8 @@ try {
 
     # Golden records: what the C++ build computes now must equal the committed record the Rust tests compare against.
     $goldens = [ordered]@{
-        'movement_golden' = 'rust\crates\movement\tests\golden\movement_v4.txt' # shared movement header (FFI)
-        'game_golden'     = 'rust\crates\game\tests\golden\game_v4.txt'         # collision map + monsters (ported to Rust)
+        'movement_golden' = 'rust\crates\movement\tests\golden\movement_v5.txt' # shared movement header (FFI)
+        'game_golden'     = 'rust\crates\game\tests\golden\game_v5.txt'         # collision map + monsters (ported to Rust)
     }
     foreach ($name in $goldens.Keys) {
         $goldenFile = Join-Path $root $goldens[$name]
@@ -101,19 +98,15 @@ try {
         Write-Host ('{0,-18} {1}' -f $name, $(if ($ok) { 'PASS' } else { 'FAIL' }))
     }
 
-    $extraChecks = 2 + $goldens.Count
-    if (Get-Command cargo -ErrorAction SilentlyContinue) {
-        $extraChecks++
-        $manifest = Join-Path $root 'rust\Cargo.toml'
-        $rustLog = Join-Path $logs 'rust_tests.log'
-        cmd /c "cargo test --workspace --manifest-path `"$manifest`" > `"$rustLog`" 2>&1"
-        $ok = $LASTEXITCODE -eq 0
-        if (-not $ok) { $failed++ }
-        Write-Host ('{0,-18} {1}' -f 'rust_tests', $(if ($ok) { 'PASS' } else { 'FAIL' }))
-    }
-    else { Write-Host ('{0,-18} {1}' -f 'rust_tests', 'SKIP (cargo not found: install Rust from https://rustup.rs)') }
+    $extraChecks = 3 + $goldens.Count
+    $manifest = Join-Path $root 'rust\Cargo.toml'
+    $rustLog = Join-Path $logs 'rust_tests.log'
+    cmd /c "cargo test --workspace --manifest-path `"$manifest`" > `"$rustLog`" 2>&1"
+    $ok = $LASTEXITCODE -eq 0
+    if (-not $ok) { $failed++ }
+    Write-Host ('{0,-18} {1}' -f 'rust_tests', $(if ($ok) { 'PASS' } else { 'FAIL' }))
 
-    $server = Start-Process -FilePath $serverExe -ArgumentList "--port $Port --threads 4 --pve-monsters 0 --pve-slam-ms 1500" `
+    $server = Start-Process -FilePath $serverExe -ArgumentList "--port $Port --threads 4 --practice-monsters 0 --practice-slam-ms 1500 --match-monsters 0 --match-start-teams 99" `
         -RedirectStandardOutput (Join-Path $logs 'server.log') -RedirectStandardError (Join-Path $logs 'server.err.log') -PassThru -NoNewWindow
     $monsterPort = $Port + 1
     $monsterServer = Start-Process -FilePath $serverExe -ArgumentList "--port $monsterPort --threads 4" `

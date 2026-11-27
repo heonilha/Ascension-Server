@@ -1,4 +1,4 @@
-# movement golden: protocol v4, 45 obstacles
+# movement golden: protocol v5, 45 obstacles
 run 0 tick 300 c516399b c4271682 c3a68000 42c60000 0 0 00000000 00000000
 run 0 tick 600 c52c70de c42018fc 42100000 c3990000 0 0 00000000 00000000
 run 0 tick 900 c52a40e3 42a55ce7 43148000 c3580000 0 0 bf765e21 3e8b2012

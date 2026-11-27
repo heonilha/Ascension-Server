@@ -70,7 +70,8 @@ impl SessionHandle {
 struct Session {
     handle: SessionHandle,
     rooms: Arc<RoomManager>,
-    room: Option<(RoomHandle, RoomMode, u32)>,
+    /// (방, 모드, teamCode, 팀 번호)
+    room: Option<(RoomHandle, RoomMode, u32, u8)>,
     name: String,
     logged_in: bool,
 }
@@ -203,7 +204,7 @@ impl Session {
 
     /// 방에 들어가 있으면 명령을 보낸다. 방의 대기열이 가득 차 있으면 빌 때까지 이 세션의 읽기가 멈춘다.
     async fn to_room(&self, command: RoomCommand) {
-        if let Some((room, _, _)) = &self.room {
+        if let Some((room, _, _, _)) = &self.room {
             room.send(command).await;
         }
     }
@@ -250,18 +251,23 @@ impl Session {
         let Some(mode) = RoomMode::from_raw(raw_mode) else {
             return reject(EnterResult::InvalidMode);
         };
-        let Some(room) = self.rooms.reserve(mode, team_code) else {
-            return reject(EnterResult::RoomFull);
+        let team = if mode == RoomMode::Match { packet.team } else { 0 };
+        if !RoomManager::valid_team(mode, team) {
+            return reject(EnterResult::InvalidTeam);
+        }
+        let room = match self.rooms.reserve(mode, team_code, team) {
+            Ok(room) => room,
+            Err(result) => return reject(result),
         };
         // 성공 응답(S_EnterRoom)은 방 태스크에서 보낸다
-        room.send(RoomCommand::Enter { session: self.handle.clone(), name: self.name.clone() }).await;
-        self.room = Some((room, mode, team_code));
+        room.send(RoomCommand::Enter { session: self.handle.clone(), name: self.name.clone(), team }).await;
+        self.room = Some((room, mode, team_code, team));
     }
 
     async fn leave_room(&mut self) {
-        if let Some((room, mode, team_code)) = self.room.take() {
+        if let Some((room, mode, team_code, team)) = self.room.take() {
             room.send(RoomCommand::Leave { player_id: self.handle.id() }).await;
-            self.rooms.release(mode, team_code);
+            self.rooms.release(mode, team_code, team);
         }
     }
 }

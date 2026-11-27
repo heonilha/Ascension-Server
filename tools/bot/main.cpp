@@ -1,7 +1,7 @@
 // 헤드리스 봇 클라이언트. 서버 동작 확인과 이후 부하 테스트에 쓴다.
 //
 // ascension_bot [--host 127.0.0.1] [--port 7777] [--bots 6] [--team-size 3] [--seconds 5]
-//               [--team-base 1000] [--mode pve|pvp] [--cheat] [--burst] [--wall] [--map data/CombatLab.txt]
+//               [--team-base 1000] [--mode practice|match] [--cheat] [--burst] [--wall] [--map data/CombatLab.txt]
 //               [--latency 0] [--dodge-test] [--dodge-cheat] [--rtt-lie 0] [--allow-others]
 //               [--monsters] [--expect-cap] [--hunt] [--wave-cheat]
 //
@@ -12,19 +12,19 @@
 //     같은 입력 번호의 예측 위치를 비교한다. 정상 봇은 예측 오차가 1cm 미만이어야 한다.
 //   - 정원을 넘긴 봇은 RoomFull을 받았는가
 //   - --cheat: 0번 봇이 입력을 3배 빠르게 보내도(속도 조작) 서버 위치가 달리기 속도를 넘지 않는가
-//   - --wall: PvE 0번 봇이 남쪽 부서진 기둥(100,-650)으로 계속 걸어도 서버 위치가 기둥에 파고들지 않는가
+//   - --wall: 연습 방 0번 봇이 남쪽 부서진 기둥(100,-650)으로 계속 걸어도 서버 위치가 기둥에 파고들지 않는가
 //   - --burst: 매 틱 회피를 눌러도 재사용 대기가 지켜지고 예측이 어긋나지 않는가
 //
 // 회피 판정 시험(--dodge-test)
 //   봇은 제자리에 서서, 자기를 노린 공격(S_AttackStart)마다 정해 둔 시각에 회피를 누른다.
-//   PvE는 서버의 내려찍기 시험 패턴(서버 --pve-slam-ms)을, PvP는 0번 봇의 근접 공격을 받는다.
+//   연습 방은 서버의 내려찍기 시험 패턴(서버 --pve-slam-ms)을, 매치는 0번 봇의 근접 공격을 받는다.
 //   서버 결과(S_HitResult)가 봇이 계산한 기대값(회피/피격)과 같은지 확인한다.
 //   기대값이 판정 경계에서 25ms 안이면 시계 추정 오차 때문에 비교에서 뺀다.
 //   --latency: 송신·수신에 각각 이만큼 인공 지연을 넣는다(한쪽 방향 ms).
 //   --dodge-cheat: 늦게 누르고 누른 시각을 앞당겨 보내는 조작을 섞는다. 상한 밖이면 피격이어야 한다.
 //   --rtt-lie: 서버에 알려 주는 왕복 시간을 이 값으로 속인다(되감기 상한 시험).
 //
-// 몬스터 시험(몬스터가 켜진 서버의 PvE 방)
+// 몬스터 시험(몬스터가 켜진 서버의 연습 방)
 //   --monsters: 몬스터가 생기고(10마리 이상, 48마리 이하), 장애물에 파고들지 않고, 공격을 예고하는지 확인한다.
 //   --expect-cap: 아무도 잡지 않을 때 정확히 48마리까지 차는지 확인한다(35초 이상 돌릴 것).
 //   --hunt: 제자리에서 가장 가까운 몬스터에게 검기를 쏜다. 명중·처치·넉백·경직을 확인한다. 죽으면 부활한다.
@@ -32,7 +32,8 @@
 #include "AscensionProtocol.h"
 #include "AscensionMovement.h"
 #include "game/CollisionMap.h"
-#include "game/Room.h"
+#include "game/Monsters.h"
+#include "game/RoomLayout.h"
 #include "net/Packet.h"
 
 #include <asio.hpp>
@@ -73,7 +74,7 @@ namespace
         int teamSize = 3;
         int seconds = 5;
         std::uint32_t teamBase = 1000;
-        RoomMode mode = RoomMode::PvE;
+        RoomMode mode = RoomMode::Practice;
         bool cheat = false;
         bool wall = false; // 0번 봇이 기둥을 뚫고 지나가려 한다
         bool allowOthers = false; // 같은 방에 봇이 아닌 플레이어(언리얼 클라이언트)가 있어도 된다
@@ -118,7 +119,7 @@ namespace
         std::uint32_t lastRttMs = 0;
         std::set<std::uint32_t> movedOthers; // 이동을 받아 본 다른 플레이어
         int attacksSent = 0;
-        int myAttackResults = 0; // 내 공격에 대한 판정 수(PvP 공격 봇)
+        int myAttackResults = 0; // 내 공격에 대한 판정 수(매치 공격 봇)
     };
 
     // 회피 시험 계획 하나: 명중 시각 기준 언제 누를지
@@ -221,6 +222,8 @@ namespace
                 auto enter = Make<C_EnterRoom>();
                 enter.teamCode = teamCode_;
                 enter.mode = options_.mode;
+                // 매치: 같은 방 봇끼리 서로 다른 팀(1~4)으로 들어가 서로 공격이 맞게 한다
+                enter.team = static_cast<std::uint8_t>((index_ % options_.teamSize) % kMaxTeams + 1);
                 co_await SendPacket(socket_, enter);
                 const auto enterBytes = co_await ReadPacket(socket_);
                 if (IdOfBytes(enterBytes) != PacketId::S_EnterRoom) throw std::runtime_error("S_EnterRoom 대신 다른 패킷");
@@ -338,8 +341,8 @@ namespace
             {
                 // 3배 빠른 입력이면 예측은 크게 어긋나고, 서버 위치는 처리권이 허용하는 속도에 머문다:
                 // 달리기 450 × 여유 1.03 + 처음 모아 둔 0.5초 분량을 시험 시간으로 나눈 값
-                const float limit = move::kRunSpeed * (static_cast<float>(game::Room::kInputRateTolerance) +
-                                                       static_cast<float>(game::Room::kMaxInputBacklog) / move::kTickRate / std::max(elapsed, 1.f));
+                const float limit = move::kRunSpeed * (static_cast<float>(game::RoomLayout::kInputRateTolerance) +
+                                                       static_cast<float>(game::RoomLayout::kMaxInputBacklog) / move::kTickRate / std::max(elapsed, 1.f));
                 std::println("bot-{} 속도 조작: 서버 이동 속도 {:.0f}cm/s (허용 상한 {:.0f}), 예측 오차 최대 {:.0f}cm", index_, rate, limit, stats_.maxPredictionError);
                 if (rate > limit * 1.02f) ok = false, problems += std::format(" 서버가 빠른 이동을 허용 {:.0f}cm/s", rate);
                 if (stats_.maxPredictionError < 10.f) ok = false, problems += " 넘친 입력이 버려지지 않음";
@@ -362,7 +365,7 @@ namespace
             return ok;
         }
 
-        bool IsAttacker() const { return options_.dodgeTest && options_.mode == RoomMode::PvP && index_ == 0; }
+        bool IsAttacker() const { return options_.dodgeTest && options_.mode == RoomMode::Match && index_ == 0; }
 
         std::uint32_t ServerNowMs() const { return static_cast<std::uint32_t>(static_cast<std::int64_t>(NowMs()) + serverOffsetMs_); }
 
@@ -840,7 +843,7 @@ namespace
                     }
                 }
 
-                // PvP 공격 봇: 상대를 향해 1.6초마다 근접 공격(회피 재사용 대기 1초보다 길게)
+                // 매치 공격 봇: 상대를 향해 1.6초마다 근접 공격(회피 재사용 대기 1초보다 길게)
                 if (IsAttacker() && target_ && steady_clock::now() >= nextAttack)
                 {
                     nextAttack += milliseconds(1600);
@@ -889,7 +892,7 @@ namespace
         };
         std::vector<KnockCheck> knockChecks_;
         float lastWaveDirX_ = 1.f, lastWaveDirY_ = 0.f;
-        std::optional<Vec3> target_; // 같은 방 다른 플레이어의 마지막 위치(PvP 공격 봇이 노린다)
+        std::optional<Vec3> target_; // 같은 방 다른 플레이어의 마지막 위치(매치 공격 봇이 노린다)
         ModeRules rules_{};
         std::int64_t serverOffsetMs_ = 0; // 서버 시각 - 내 시각
         std::uint32_t bestRttMs_ = UINT32_MAX;
@@ -938,7 +941,7 @@ int main(int argc, char** argv)
         else if (key == "--team-size") options.teamSize = std::max(1, ParseNumber<int>(value, options.teamSize));
         else if (key == "--seconds") options.seconds = ParseNumber<int>(value, options.seconds);
         else if (key == "--team-base") options.teamBase = ParseNumber<std::uint32_t>(value, options.teamBase);
-        else if (key == "--mode") options.mode = value == "pvp" ? RoomMode::PvP : RoomMode::PvE;
+        else if (key == "--mode") options.mode = value == "pvp" || value == "match" ? RoomMode::Match : RoomMode::Practice;
         else if (key == "--latency") options.latencyMs = std::max(0, ParseNumber<int>(value, 0));
         else if (key == "--rtt-lie") options.rttLie = ParseNumber<std::uint32_t>(value, 0);
         ++i;
@@ -963,12 +966,12 @@ int main(int argc, char** argv)
         asio::co_spawn(io, bot->Run(), asio::detached);
     }
     std::println("봇 {}개 접속: {}:{}, {} 방, 팀당 {}명, {}초, 지연 {}ms{}", options.bots, options.host, options.port,
-                 options.mode == RoomMode::PvP ? "PvP" : "PvE", options.teamSize, options.seconds, options.latencyMs,
+                 options.mode == RoomMode::Match ? "매치" : "연습 방", options.teamSize, options.seconds, options.latencyMs,
                  options.dodgeTest ? ", 회피 시험" : "");
     io.run();
 
     bool allOk = true;
-    const int capacity = options.mode == RoomMode::PvP ? kMaxPvpPlayers : kMaxRoomPlayers;
+    const int capacity = options.mode == RoomMode::Match ? kMaxMatchPlayers : kMaxPracticePlayers;
     for (int team = 0; team * options.teamSize < options.bots; ++team)
     {
         // 같은 방에 들어가려 한 봇 수 → 입장 성공 수와 정원 초과 수

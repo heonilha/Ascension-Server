@@ -4,7 +4,7 @@
 //
 // 좌표는 클라이언트 Scripts/CreateMap.py의 배치에서 가져왔다. 캡슐 중심 높이 92(바닥 z=0에 선 주인공).
 #include "game/CollisionMap.h"
-#include "game/Room.h"
+#include "game/RoomLayout.h"
 
 #include "core/Platform.h"
 
@@ -48,7 +48,7 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
     }
     const CollisionMap& map = *loaded;
-    constexpr float r = Room::kTerrainRadius, sweep = Room::kTerrainSweepRadius;
+    constexpr float r = RoomLayout::kTerrainRadius, sweep = RoomLayout::kTerrainSweepRadius;
 
     Check(map.Obstacles().size() == 45, "obstacle_count_45");
 
@@ -95,13 +95,14 @@ int main(int argc, char** argv)
 
     // 시작 위치: 실제 캡슐 반지름(32)으로도 막히지 않아야 한다
     bool spawnsOk = true;
-    for (int slot = 0; slot < proto::kMaxRoomPlayers; ++slot) spawnsOk &= !map.Blocked(Room::SpawnPosition(proto::RoomMode::PvE, slot), 32.f);
-    for (int slot = 0; slot < proto::kMaxPvpPlayers; ++slot)
-    {
-        Vec3 p = Room::SpawnPosition(proto::RoomMode::PvP, slot);
-        p.z = 92.f;
-        spawnsOk &= !map.Blocked(p, 32.f);
-    }
+    for (int slot = 0; slot < proto::kMaxPracticePlayers; ++slot) spawnsOk &= !map.Blocked(RoomLayout::PracticeSpawnPosition(slot), 32.f);
+    for (int team = 1; team <= proto::kMaxTeams; ++team)
+        for (int member = 0; member < proto::kMaxTeamPlayers; ++member)
+        {
+            Vec3 p = RoomLayout::TeamSpawnPosition(team, member);
+            p.z = 92.f;
+            spawnsOk &= !map.Blocked(p, 32.f);
+        }
     Check(spawnsOk, "all_spawns_free");
 
     std::println("{} ({} failed)", failures == 0 ? "결과: PASS" : "결과: FAIL", failures);

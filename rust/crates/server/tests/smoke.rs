@@ -21,9 +21,9 @@ async fn start(options: RoomOptions) -> (SocketAddr, Arc<RoomManager>) {
     (address, rooms)
 }
 
-fn with_map(pve_monsters: bool) -> RoomOptions {
+fn with_map(practice_monsters: bool) -> RoomOptions {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/CombatLab.txt");
-    RoomOptions { pve_slam_interval_ms: 0, pve_monsters, map: Some(Arc::new(CollisionMap::load(&path).unwrap())) }
+    RoomOptions { practice_monsters, map: Some(Arc::new(CollisionMap::load(&path).unwrap())), ..RoomOptions::default() }
 }
 
 struct Client {
@@ -77,9 +77,14 @@ impl Client {
     }
 
     async fn enter(&mut self, mode: u8, team_code: u32) -> (SEnterRoom, Vec<u8>) {
+        self.enter_team(mode, team_code, 0).await
+    }
+
+    async fn enter_team(&mut self, mode: u8, team_code: u32, team: u8) -> (SEnterRoom, Vec<u8>) {
         let mut enter = make::<CEnterRoom>();
         enter.team_code = team_code;
         enter.mode = mode;
+        enter.team = team;
         self.send(encode(&enter)).await;
         self.expect::<SEnterRoom>().await
     }
@@ -92,18 +97,18 @@ async fn login_enter_move_and_leave() {
     assert_eq!(alice.login("alice").await.result, LoginResult::Ok.raw());
     assert_eq!(alice.login("again").await.result, LoginResult::AlreadyLoggedIn.raw());
 
-    let (entered, others) = alice.enter(RoomMode::PvE.raw(), 7).await;
+    let (entered, others) = alice.enter(RoomMode::Practice.raw(), 7).await;
     assert_eq!((entered.result, entered.count, entered.capacity, { entered.team_code }), (EnterResult::Ok.raw(), 0, 3, 7));
     assert!(others.is_empty());
-    assert_eq!({ entered.rules }, asc_game::combat_rules::PVE_RULES);
+    assert_eq!({ entered.rules }, asc_game::combat_rules::PRACTICE_RULES);
     let spawn = entered.spawn_position;
     assert_eq!(({ spawn.x }, { spawn.y }), (-750.0, -150.0));
-    assert_eq!(alice.enter(RoomMode::PvE.raw(), 8).await.0.result, EnterResult::AlreadyInRoom.raw());
+    assert_eq!(alice.enter(RoomMode::Practice.raw(), 8).await.0.result, EnterResult::AlreadyInRoom.raw());
 
     // 두 번째 사람: 먼저 있던 사람 목록을 받고, 먼저 있던 사람은 입장 알림을 받는다
     let mut bob = Client::connect(address).await;
     bob.login("bob").await;
-    let (entered, others) = bob.enter(RoomMode::PvE.raw(), 7).await;
+    let (entered, others) = bob.enter(RoomMode::Practice.raw(), 7).await;
     assert_eq!(entered.count, 1);
     let (info, _) = read::<PlayerInfo>(&others).unwrap();
     assert_eq!(({ info.player_id }, name_str(&info.name).as_ref()), (alice.player_id, "alice"));
@@ -166,25 +171,25 @@ async fn rejections() {
     old.send(encode(&login)).await;
     let (reply, _) = old.expect::<SLogin>().await;
     assert_eq!((reply.result, { reply.server_version }), (LoginResult::VersionMismatch.raw(), VERSION));
-    assert_eq!(old.enter(RoomMode::PvE.raw(), 1).await.0.result, EnterResult::NotLoggedIn.raw());
+    assert_eq!(old.enter(RoomMode::Practice.raw(), 1).await.0.result, EnterResult::NotLoggedIn.raw());
 
     // 없는 모드
     let mut client = Client::connect(address).await;
     client.login("").await; // 이름이 비면 서버가 붙인다
     assert_eq!(client.enter(9, 1).await.0.result, EnterResult::InvalidMode.raw());
 
-    // PvE 정원 3명: 네 번째는 거부. 모드가 다르면 같은 teamCode라도 다른 방이다
+    // 연습 방 정원 3명: 네 번째는 거부. 모드가 다르면 같은 teamCode라도 다른 방이다
     let mut members = Vec::new();
     for i in 0..3 {
         let mut member = Client::connect(address).await;
         member.login(&format!("m{i}")).await;
-        let (entered, _) = member.enter(RoomMode::PvE.raw(), 5).await;
+        let (entered, _) = member.enter(RoomMode::Practice.raw(), 5).await;
         assert_eq!((entered.result, entered.count as usize), (EnterResult::Ok.raw(), i));
         members.push(member);
     }
-    assert_eq!(client.enter(RoomMode::PvE.raw(), 5).await.0.result, EnterResult::RoomFull.raw());
-    let (entered, _) = client.enter(RoomMode::PvP.raw(), 5).await;
-    assert_eq!((entered.result, entered.capacity, { entered.rules }), (EnterResult::Ok.raw(), 16, asc_game::combat_rules::PVP_RULES));
+    assert_eq!(client.enter(RoomMode::Practice.raw(), 5).await.0.result, EnterResult::RoomFull.raw());
+    let (entered, _) = client.enter_team(RoomMode::Match.raw(), 5, 1).await;
+    assert_eq!((entered.result, entered.capacity, { entered.rules }), (EnterResult::Ok.raw(), 12, asc_game::combat_rules::MATCH_RULES));
 
     // 한 명이 나가면 자리가 난다
     members.pop();
@@ -192,7 +197,7 @@ async fn rejections() {
     late.login("late").await;
     let mut result = EnterResult::RoomFull.raw();
     for _ in 0..50 {
-        result = late.enter(RoomMode::PvE.raw(), 5).await.0.result;
+        result = late.enter(RoomMode::Practice.raw(), 5).await.0.result;
         if result == EnterResult::Ok.raw() {
             break;
         }
@@ -225,15 +230,55 @@ async fn malformed_packets_close_the_connection() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pve_room_with_monsters_sends_monster_batches() {
+async fn practice_room_with_monsters_sends_monster_batches() {
     let (address, _rooms) = start(with_map(true)).await;
     let mut client = Client::connect(address).await;
     client.login("hunter").await;
-    client.enter(RoomMode::PvE.raw(), 3).await;
+    client.enter(RoomMode::Practice.raw(), 3).await;
     // 첫 보충은 방이 생기고 1초 뒤다
     let (batch, entries) = client.expect::<SMonsterBatch>().await;
     assert!(batch.count >= 1);
     assert_eq!(entries.len(), batch.count as usize * std::mem::size_of::<MonsterEntry>());
     let (monster, _) = read::<MonsterEntry>(&entries).unwrap();
     assert!(monster.kind <= 2 && { monster.hp } > 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn match_checks_teams_and_sends_match_state() {
+    let (address, _rooms) = start(with_map(false)).await;
+    let mut lone = Client::connect(address).await;
+    lone.login("lone").await;
+    // 팀 번호는 1~4
+    assert_eq!(lone.enter_team(RoomMode::Match.raw(), 9, 0).await.0.result, EnterResult::InvalidTeam.raw());
+    assert_eq!(lone.enter_team(RoomMode::Match.raw(), 9, 5).await.0.result, EnterResult::InvalidTeam.raw());
+
+    // 팀 1에 3명까지. 입장하면 팀 정보가 담긴 목록과 매치 상태(대기)를 받는다
+    let mut team1 = Vec::new();
+    for i in 0..3 {
+        let mut member = Client::connect(address).await;
+        member.login(&format!("t1-{i}")).await;
+        let (entered, others) = member.enter_team(RoomMode::Match.raw(), 9, 1).await;
+        assert_eq!((entered.result, entered.count as usize), (EnterResult::Ok.raw(), i));
+        if i > 0 {
+            assert_eq!(read::<PlayerInfo>(&others).unwrap().0.team, 1);
+        }
+        let (state, _) = member.expect::<SMatchState>().await;
+        assert_eq!((state.phase, state.round), (MatchPhase::Waiting.raw(), 0));
+        team1.push(member);
+    }
+    assert_eq!(lone.enter_team(RoomMode::Match.raw(), 9, 1).await.0.result, EnterResult::TeamFull.raw());
+
+    // 두 번째 팀이 오면 카운트다운
+    let (entered, _) = lone.enter_team(RoomMode::Match.raw(), 9, 2).await;
+    assert_eq!(entered.result, EnterResult::Ok.raw());
+    let spawn = entered.spawn_position;
+    let base = asc_game::room_layout::team_spawn_position(2, 0);
+    assert_eq!(({ spawn.x }, { spawn.y }), ({ base.x }, { base.y }));
+    loop {
+        let (state, _) = lone.expect::<SMatchState>().await;
+        if state.phase == MatchPhase::Countdown.raw() {
+            assert_eq!(state.teams_alive, 2);
+            break;
+        }
+    }
 }

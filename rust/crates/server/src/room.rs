@@ -1,4 +1,7 @@
-//! 방 하나: PvE 층 인스턴스(팀 하나, 최대 3명) 또는 PvP 스테이지(최대 16명).
+//! 방 하나: 배틀로얄 매치(최대 4팀 × 3명) 또는 개발 시험용 연습 방(최대 3명).
+//!
+//! 매치: 몬스터 사냥 + 팀 간 전투. 같은 팀끼리는 공격이 맞지 않는다. 대기 → 카운트다운 → 1~4라운드(사이마다 자기장 축소)
+//! → 최후의 1팀 → 결과 표시 뒤 다시 대기. 시간표·자기장·부활 대기는 `asc_game::match_rules`가 정한다.
 //!
 //! 방의 상태는 방 태스크 하나만 가진다. 세션은 `RoomHandle`로 명령을 보내고, 방 태스크가 받은 순서대로 처리한다.
 //! 명령 처리 사이사이에 20Hz 틱이 돈다. 서로 다른 방은 다른 태스크라서 여러 스레드에서 동시에 돌아간다.
@@ -8,8 +11,10 @@ use crate::clock::server_time_ms;
 use crate::log;
 use crate::session::{Buffer, SessionHandle};
 use asc_game::combat_rules::{allowed_rewind_ms, capacity_for, clamp_press_time, in_iframe, rules_for, COOLDOWN_SLACK_MS};
+use asc_game::match_rules::{self, running_phase, MatchSchedule, RunningPhase, ZONE_CENTER, ZONE_RADIUS};
 use asc_game::monsters::{tuning, MonsterEvents, MonsterField, MonsterPlayer};
-use asc_game::room_layout::{spawn_position, ARENA_HALF_DEPTH, ARENA_HALF_WIDTH};
+use asc_game::rng::Rng;
+use asc_game::room_layout::{practice_spawn_position, team_spawn_position, ARENA_HALF_DEPTH, ARENA_HALF_WIDTH};
 use asc_game::CollisionMap;
 use asc_movement::{World, GROUND_Z, RADIUS, TICK_RATE};
 use asc_protocol::*;
@@ -67,28 +72,60 @@ const MIN_CHARGE: f32 = 0.2;
 /// 완충에 필요한 시간 3초에 10% 여유
 const FULL_CHARGE_MS: u32 = 2700;
 
+/// 매치 상태(S_MatchState)를 변화가 없어도 다시 보내는 주기
+const MATCH_STATE_INTERVAL_MS: u32 = 2000;
+/// 자기장 피해 주기(1초마다 초당 피해를 한 번에 준다)
+const ZONE_DAMAGE_INTERVAL_MS: u32 = 1000;
+/// 부활 위치 후보 수
+const RESPAWN_CANDIDATES: usize = 24;
+
 /// 방의 명령 대기열 크기. 가득 차면 보내는 세션의 읽기가 멈춘다(입력을 쏟아붓는 클라이언트가 메모리를 늘리지 못한다).
 const COMMAND_QUEUE: usize = 1024;
 
 #[derive(Clone, Default)]
 pub struct RoomOptions {
-    /// PvE 방에서 이 주기(ms)로 서버 내려찍기 시험 패턴을 낸다. 0이면 끈다.
-    /// 회피 판정을 정해진 박자로 시험하는 용도다(수문장 패턴을 서버로 옮기면 그 패턴으로 바꾼다).
-    pub pve_slam_interval_ms: u32,
-    /// PvE 방에 서버 몬스터를 둔다(증원·추적·공격). 끄면 빈 방이다(회피 판정 시험용).
-    pub pve_monsters: bool,
+    /// 연습 방에서 이 주기(ms)로 서버 내려찍기 시험 패턴을 낸다. 0이면 끈다(회피 판정을 정해진 박자로 시험하는 용도).
+    pub practice_slam_interval_ms: u32,
+    /// 연습 방에 서버 몬스터를 둔다(증원·추적·공격). 끄면 빈 방이다(회피 판정 시험용).
+    pub practice_monsters: bool,
+    /// 매치에 서버 몬스터를 둔다. 끄면 플레이어끼리만 싸운다(회피 판정 시험용).
+    pub match_monsters: bool,
+    /// 매치 시간표(라운드·축소·부활 대기). 기본은 기획안의 36분. 데모·시험은 `MatchSchedule::scaled`로 줄인다.
+    pub schedule: MatchSchedule,
     /// 충돌 지형. 있으면 이동(장애물 안·통과)과 공격(엄폐)을 지형으로도 검사한다. 모든 방이 같은 것을 읽기만 한다.
     pub map: Option<Arc<CollisionMap>>,
 }
 
 pub enum RoomCommand {
-    Enter { session: SessionHandle, name: String },
-    Leave { player_id: u32 },
-    Input { player_id: u32, packet: CInput, commands: Vec<InputCommand> },
-    Dodge { player_id: u32, packet: CDodge },
-    Attack { player_id: u32, packet: CAttack },
-    ReportRtt { player_id: u32, rtt_ms: u32 },
-    Respawn { player_id: u32 },
+    /// `team`: 매치 팀 번호 1~4(세션이 확인했다). 연습 방은 0
+    Enter {
+        session: SessionHandle,
+        name: String,
+        team: u8,
+    },
+    Leave {
+        player_id: u32,
+    },
+    Input {
+        player_id: u32,
+        packet: CInput,
+        commands: Vec<InputCommand>,
+    },
+    Dodge {
+        player_id: u32,
+        packet: CDodge,
+    },
+    Attack {
+        player_id: u32,
+        packet: CAttack,
+    },
+    ReportRtt {
+        player_id: u32,
+        rtt_ms: u32,
+    },
+    Respawn {
+        player_id: u32,
+    },
 }
 
 /// 방에 명령을 보내는 손잡이.
@@ -128,6 +165,10 @@ struct Member {
     player_id: u32,
     name: String,
     slot: usize,
+    /// 매치 팀 번호 1~4. 연습 방은 0
+    team: u8,
+    /// 팀 안에서 몇 번째 자리(0~2). 팀 시작 위치를 정한다
+    team_slot: usize,
     position: Vec3,
     velocity: Vec3,
     yaw: f32,
@@ -151,6 +192,10 @@ struct Member {
     dead: bool,
     /// 부활 직후 보호: 이 시각 전에 명중하는 공격은 맞지 않는다
     protected_until_ms: u32,
+    /// 매치: 이 시각에 서버가 부활시킨다
+    respawn_at_ms: Option<u32>,
+    /// 매치: 4라운드에 죽어 탈락했다(이 판에서는 부활하지 않는다)
+    eliminated: bool,
     /// 0 = 아직 모름
     rtt_ms: u32,
     /// 최근 회피 몇 개(판정 유예 동안 필요한 만큼)
@@ -163,6 +208,8 @@ struct Member {
 struct ActiveAttack {
     attack_id: u32,
     attacker_id: u32,
+    /// 공격한 플레이어의 팀(매치). 같은 팀은 맞지 않는다. 0 = 몬스터·서버 공격
+    attacker_team: u8,
     kind: AttackKind,
     hit_ms: u32,
     /// 엄폐 검사 시작점: 공격자 위치(근접) 또는 범위 중심(내려찍기)
@@ -186,6 +233,7 @@ impl ActiveAttack {
         ActiveAttack {
             attack_id: 0,
             attacker_id: 0,
+            attacker_team: 0,
             kind,
             hit_ms,
             origin,
@@ -199,6 +247,26 @@ impl ActiveAttack {
             resolved: Vec::new(),
         }
     }
+}
+
+/// 매치 진행 단계(방 내부 상태). 진행 중 세부 단계(라운드·축소)는 시작 시각으로 계산한다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Stage {
+    Waiting,
+    Countdown {
+        start_ms: u32,
+        end_ms: u32,
+    },
+    /// `start_ms` = 1라운드 시작
+    Running {
+        start_ms: u32,
+    },
+    Ended {
+        start_ms: u32,
+        end_ms: u32,
+        winner: u8,
+        round: u8,
+    },
 }
 
 struct Room {
@@ -221,6 +289,18 @@ struct Room {
     /// 직전 틱에 몬스터 목록을 보냈는가(0마리가 되면 빈 목록을 한 번 보낸다)
     sent_monsters: bool,
     last_tick_time: Option<Instant>,
+
+    // 매치
+    stage: Stage,
+    /// 1라운드를 시작할 때 있던 팀 수. 2팀 이상으로 시작했으면 1팀이 남을 때 끝난다
+    started_teams: usize,
+    /// 가장 마지막에 죽은 사람의 팀(동시 전멸 판정)
+    last_death_team: Option<u8>,
+    /// 마지막으로 보낸 (단계, 라운드, 남은 팀 수). 바뀌면 바로 다시 보낸다
+    sent_match_key: Option<(u8, u8, u8)>,
+    next_match_state_ms: u32,
+    next_zone_damage_ms: u32,
+    rng: Rng,
     // 틱 처리 시간 통계(10초마다 로그)
     tick_cost_sum_ms: f64,
     tick_cost_max_ms: f64,
@@ -231,8 +311,8 @@ struct Room {
 
 fn mode_name(mode: RoomMode) -> &'static str {
     match mode {
-        RoomMode::PvP => "PvP",
-        RoomMode::PvE => "PvE",
+        RoomMode::Match => "매치",
+        RoomMode::Practice => "연습",
     }
 }
 
@@ -252,6 +332,7 @@ fn to_info(member: &Member) -> PlayerInfo {
     copy_name(&mut info.name, &member.name);
     info.position = member.position;
     info.yaw = member.yaw;
+    info.team = member.team;
     info
 }
 
@@ -290,6 +371,13 @@ impl Room {
             monster_attacks: HashMap::new(),
             sent_monsters: false,
             last_tick_time: None,
+            stage: Stage::Waiting,
+            started_teams: 0,
+            last_death_team: None,
+            sent_match_key: None,
+            next_match_state_ms: 0,
+            next_zone_damage_ms: 0,
+            rng: Rng::new(team_code.wrapping_mul(2246822519) ^ 0x5bd1_e995),
             tick_cost_sum_ms: 0.0,
             tick_cost_max_ms: 0.0,
             monster_sim_sum_ms: 0.0,
@@ -300,8 +388,12 @@ impl Room {
 
     async fn run(mut self, mut commands: mpsc::Receiver<RoomCommand>) {
         let now_ms = server_time_ms();
-        self.next_slam_ms = now_ms.wrapping_add(self.options.pve_slam_interval_ms);
-        if self.mode == RoomMode::PvE && self.options.pve_monsters {
+        self.next_slam_ms = now_ms.wrapping_add(self.options.practice_slam_interval_ms);
+        let monsters = match self.mode {
+            RoomMode::Practice => self.options.practice_monsters,
+            RoomMode::Match => self.options.match_monsters,
+        };
+        if monsters {
             self.monsters = Some(MonsterField::new(self.options.map.clone(), self.team_code.wrapping_mul(2654435761) ^ now_ms, now_ms));
         }
         let (iframe_ms, rewind_cap_ms) = (self.rules.iframe_ms, self.rules.rewind_cap_ms);
@@ -342,7 +434,7 @@ impl Room {
 
     fn handle(&mut self, command: RoomCommand) {
         match command {
-            RoomCommand::Enter { session, name } => self.enter(session, name),
+            RoomCommand::Enter { session, name, team } => self.enter(session, name, team),
             RoomCommand::Leave { player_id } => self.leave(player_id),
             RoomCommand::Input { player_id, packet, commands } => self.input(player_id, &packet, &commands),
             RoomCommand::Dodge { player_id, packet } => self.dodge(player_id, &packet),
@@ -370,7 +462,7 @@ impl Room {
         }
     }
 
-    fn enter(&mut self, session: SessionHandle, name: String) {
+    fn enter(&mut self, session: SessionHandle, name: String, team: u8) {
         if self.find(session.id()).is_some() {
             return;
         }
@@ -380,7 +472,13 @@ impl Room {
             return;
         };
 
-        let position = spawn_position(self.mode, slot);
+        let team = if self.mode == RoomMode::Match { team } else { 0 };
+        // 팀 안의 빈 자리(0~2). RoomManager가 팀 정원을 먼저 확인했다.
+        let team_slot = (0..3).find(|s| self.members.iter().all(|m| m.team != team || m.team_slot != *s)).unwrap_or(0);
+        let position = match self.mode {
+            RoomMode::Match => team_spawn_position(team, team_slot),
+            RoomMode::Practice => practice_spawn_position(slot),
+        };
         let mut sim = MoveSimState::zeroed();
         sim.x = position.x;
         sim.y = position.y;
@@ -390,6 +488,8 @@ impl Room {
             session,
             name,
             slot,
+            team,
+            team_slot,
             position,
             velocity: Vec3::zeroed(),
             yaw: 0.0,
@@ -406,6 +506,8 @@ impl Room {
             hp: MAX_HP,
             dead: false,
             protected_until_ms: 0,
+            respawn_at_ms: None,
+            eliminated: false,
             rtt_ms: 0,
             dodges: VecDeque::new(),
             last_attack_ms: 0,
@@ -432,8 +534,12 @@ impl Room {
         joined.player = to_info(&member);
         self.broadcast(buffer(&joined));
 
-        log!("방 {} 입장: {} (슬롯 {}, 인원 {}/{})", self.team_code, member.name, slot, self.members.len() + 1, capacity_for(self.mode));
+        log!("방 {} 입장: {} (팀 {}, 슬롯 {}, 인원 {}/{})", self.team_code, member.name, team, slot, self.members.len() + 1, capacity_for(self.mode));
+        let session = member.session.clone();
         self.members.push(member);
+        if self.mode == RoomMode::Match {
+            session.send(buffer(&self.match_state(now_ms)));
+        }
     }
 
     fn leave(&mut self, player_id: u32) {
@@ -444,6 +550,9 @@ impl Room {
         let mut left = make::<SPlayerLeft>();
         left.player_id = player_id;
         self.broadcast(buffer(&left));
+        if self.mode == RoomMode::Match {
+            self.check_winner(server_time_ms());
+        }
     }
 
     fn input(&mut self, player_id: u32, packet: &CInput, commands: &[InputCommand]) {
@@ -546,18 +655,19 @@ impl Room {
         let now_ms = server_time_ms();
         let kind = AttackKind::from_raw(packet.kind);
 
-        if self.mode == RoomMode::PvE {
-            // PvE: 검기(투사체)로 몬스터를 친다.
-            if self.monsters.is_some() && matches!(kind, Some(AttackKind::Wave | AttackKind::HeavyWave)) {
+        // 검기(투사체)는 몬스터를 친다(두 모드 공통).
+        if matches!(kind, Some(AttackKind::Wave | AttackKind::HeavyWave)) {
+            if self.monsters.is_some() {
                 self.wave(index, packet, kind == Some(AttackKind::HeavyWave), now_ms);
             }
             return;
         }
-        if kind != Some(AttackKind::Slash) {
+        // 근접 공격은 매치에서 다른 팀 플레이어를 친다.
+        if self.mode != RoomMode::Match || kind != Some(AttackKind::Slash) {
             return;
         }
 
-        // PvP 근접 공격. 시작은 서버 도착 시각 기준이다. 공격 준비 시간이 공격자 쪽 지연을 흡수하므로 되감지 않는다.
+        // 매치 근접 공격. 시작은 서버 도착 시각 기준이다. 공격 준비 시간이 공격자 쪽 지연을 흡수하므로 되감지 않는다.
         let member = &mut self.members[index];
         if member.has_attacked && now_ms.wrapping_sub(member.last_attack_ms) < SLASH_COOLDOWN_MS {
             return;
@@ -570,6 +680,7 @@ impl Room {
         let center = Vec3 { x: origin.x + SLASH_REACH * radians.cos(), y: origin.y + SLASH_REACH * radians.sin(), z: origin.z };
         let mut attack = ActiveAttack::new(AttackKind::Slash, now_ms + self.rules.attack_windup_ms as u32, origin, center, SLASH_RADIUS, SLASH_DAMAGE);
         attack.attacker_id = player_id;
+        attack.attacker_team = member.team;
         self.start_attack(attack, now_ms, true);
     }
 
@@ -617,18 +728,26 @@ impl Room {
         self.broadcast(buffer(&spawn));
     }
 
+    /// C_Respawn: 연습 방만 받는다. 매치는 서버가 부활 대기 뒤에 스스로 부활시킨다.
     fn respawn(&mut self, player_id: u32) {
         let Some(index) = self.find(player_id) else { return };
-        let mode = self.mode;
-        let member = &mut self.members[index];
-        if !member.dead {
+        if self.mode != RoomMode::Practice || !self.members[index].dead {
             return;
         }
-        let now_ms = server_time_ms();
+        let position = practice_spawn_position(self.members[index].slot);
+        self.revive(index, position, server_time_ms());
+    }
+
+    /// 살려서 `position`으로 옮기고 HP를 채운 뒤 모두에게 알린다.
+    fn revive(&mut self, index: usize, position: Vec3, now_ms: u32) {
+        let player_id = self.members[index].player_id;
+        let member = &mut self.members[index];
         member.dead = false;
+        member.eliminated = false;
+        member.respawn_at_ms = None;
         member.hp = MAX_HP;
         member.protected_until_ms = now_ms + RESPAWN_PROTECTION_MS;
-        member.position = spawn_position(mode, member.slot);
+        member.position = position;
         member.velocity = Vec3::zeroed();
         member.sim = MoveSimState::zeroed();
         member.sim.x = member.position.x;
@@ -671,6 +790,274 @@ impl Room {
         let id = attack.attack_id;
         self.attacks.push(attack);
         id
+    }
+
+    // ---- 매치 진행 ----
+
+    /// 진행 중이면 지금의 세부 단계(라운드·축소)와 1라운드 시작 뒤 지난 시간
+    fn running(&self, now_ms: u32) -> Option<(RunningPhase, u32)> {
+        match self.stage {
+            Stage::Running { start_ms } => {
+                let elapsed = now_ms.wrapping_sub(start_ms);
+                Some((running_phase(&self.options.schedule, elapsed), elapsed))
+            }
+            _ => None,
+        }
+    }
+
+    /// 지금 자기장 반지름. 시작 전·결과 표시 중에는 1라운드 크기(맵 전체)
+    fn zone_radius(&self, now_ms: u32) -> f32 {
+        self.running(now_ms).map_or(ZONE_RADIUS[0], |(phase, elapsed)| phase.radius_at(elapsed))
+    }
+
+    /// 사람이 한 명이라도 있는 팀 수
+    fn present_teams(&self) -> usize {
+        let mut teams: Vec<u8> = self.members.iter().map(|m| m.team).collect();
+        teams.sort_unstable();
+        teams.dedup();
+        teams.len()
+    }
+
+    /// 탈락하지 않은 사람이 있는 팀(오름차순, 중복 없음). 부활 대기 중인 사람도 살아 있는 팀으로 친다.
+    fn alive_teams(&self) -> Vec<u8> {
+        let mut teams: Vec<u8> = self.members.iter().filter(|m| !m.eliminated).map(|m| m.team).collect();
+        teams.sort_unstable();
+        teams.dedup();
+        teams
+    }
+
+    fn match_state(&self, now_ms: u32) -> SMatchState {
+        let mut state = make::<SMatchState>();
+        state.zone_x = ZONE_CENTER.0;
+        state.zone_y = ZONE_CENTER.1;
+        state.zone_radius_from = ZONE_RADIUS[0];
+        state.zone_radius_to = ZONE_RADIUS[0];
+        state.teams_alive = self.alive_teams().len() as u8;
+        state.respawn_allowed = 1;
+        match self.stage {
+            Stage::Waiting => state.phase = MatchPhase::Waiting.raw(),
+            Stage::Countdown { start_ms, end_ms } => {
+                state.phase = MatchPhase::Countdown.raw();
+                state.phase_start_server_ms = start_ms;
+                state.phase_end_server_ms = end_ms;
+            }
+            Stage::Running { start_ms } => {
+                let phase = running_phase(&self.options.schedule, now_ms.wrapping_sub(start_ms));
+                state.phase = phase.phase.raw();
+                state.round = phase.round;
+                state.phase_start_server_ms = start_ms + phase.start_offset_ms;
+                state.phase_end_server_ms = start_ms + phase.end_offset_ms;
+                state.zone_radius_from = phase.radius_from;
+                state.zone_radius_to = phase.radius_to;
+                state.zone_damage_percent = phase.damage_percent;
+                state.respawn_allowed = phase.respawn_wait_ms.is_some() as u8;
+            }
+            Stage::Ended { start_ms, end_ms, winner, round } => {
+                state.phase = MatchPhase::Ended.raw();
+                state.round = round;
+                state.phase_start_server_ms = start_ms;
+                state.phase_end_server_ms = end_ms;
+                state.winner_team = winner;
+            }
+        }
+        state
+    }
+
+    fn broadcast_match_state(&mut self, now_ms: u32) {
+        let state = self.match_state(now_ms);
+        self.sent_match_key = Some((state.phase, state.round, state.teams_alive));
+        self.next_match_state_ms = now_ms + MATCH_STATE_INTERVAL_MS;
+        self.broadcast(buffer(&state));
+    }
+
+    /// 틱마다: 단계 진행 → 자기장 피해 → 부활 → 상태 알림.
+    fn update_match(&mut self, now_ms: u32) {
+        let schedule = self.options.schedule;
+        match self.stage {
+            Stage::Waiting => {
+                if self.present_teams() >= schedule.start_teams as usize {
+                    self.stage = Stage::Countdown { start_ms: now_ms, end_ms: now_ms + schedule.countdown_ms };
+                    log!("방 {} 매치 카운트다운 ({}팀)", self.team_code, self.present_teams());
+                }
+            }
+            Stage::Countdown { end_ms, .. } => {
+                if self.present_teams() < schedule.start_teams as usize {
+                    self.stage = Stage::Waiting;
+                    log!("방 {} 매치 대기로 돌아감(팀 부족)", self.team_code);
+                } else if now_ms >= end_ms {
+                    self.start_round_one(now_ms);
+                }
+            }
+            Stage::Running { .. } => {
+                if now_ms >= self.next_zone_damage_ms {
+                    self.next_zone_damage_ms = now_ms + ZONE_DAMAGE_INTERVAL_MS;
+                    self.apply_zone_damage(now_ms);
+                }
+            }
+            Stage::Ended { end_ms, .. } => {
+                if now_ms >= end_ms {
+                    self.reset_match(now_ms);
+                }
+            }
+        }
+
+        // 부활 대기가 끝난 사람
+        for index in 0..self.members.len() {
+            let member = &self.members[index];
+            if member.dead && !member.eliminated && member.respawn_at_ms.is_some_and(|at| now_ms >= at) {
+                let position = self.safe_respawn_position(member.team, now_ms);
+                self.revive(index, position, now_ms);
+            }
+        }
+
+        let key = {
+            let state = self.match_state(now_ms);
+            (state.phase, state.round, state.teams_alive)
+        };
+        if self.sent_match_key != Some(key) || now_ms >= self.next_match_state_ms {
+            self.broadcast_match_state(now_ms);
+        }
+    }
+
+    /// 1라운드 시작: 모두 살려 팀 시작 위치로 옮긴다.
+    fn start_round_one(&mut self, now_ms: u32) {
+        self.stage = Stage::Running { start_ms: now_ms };
+        self.started_teams = self.present_teams();
+        self.last_death_team = None;
+        self.next_zone_damage_ms = now_ms + ZONE_DAMAGE_INTERVAL_MS;
+        log!("방 {} 매치 시작: {}팀 {}명, 총 {}초", self.team_code, self.started_teams, self.members.len(), self.options.schedule.total_ms() / 1000);
+        self.revive_everyone_at_bases(now_ms);
+    }
+
+    /// 결과 표시가 끝났다: 다음 판을 위해 대기로 돌아간다.
+    fn reset_match(&mut self, now_ms: u32) {
+        self.stage = Stage::Waiting;
+        self.started_teams = 0;
+        log!("방 {} 매치 초기화 → 대기", self.team_code);
+        self.revive_everyone_at_bases(now_ms);
+    }
+
+    fn revive_everyone_at_bases(&mut self, now_ms: u32) {
+        for index in 0..self.members.len() {
+            let position = team_spawn_position(self.members[index].team, self.members[index].team_slot);
+            self.revive(index, position, now_ms);
+        }
+    }
+
+    /// 자기장 밖 플레이어에게 1초 분량 피해(초당 최대 체력의 n%).
+    /// 같은 피해 틱에 죽은 사람은 동시에 죽은 것으로 본다: 여러 팀이 같이 죽어 아무도 안 남으면 무승부(승리 팀 0).
+    fn apply_zone_damage(&mut self, now_ms: u32) {
+        let Some((phase, elapsed)) = self.running(now_ms) else { return };
+        let radius = phase.radius_at(elapsed);
+        let damage = MAX_HP * phase.damage_percent / 100.0;
+        if damage <= 0.0 {
+            return;
+        }
+        let mut died_teams: Vec<u8> = Vec::new();
+        for index in 0..self.members.len() {
+            let member = &mut self.members[index];
+            if member.dead || !match_rules::outside_zone(member.position.x, member.position.y, radius) {
+                continue;
+            }
+            member.hp = (member.hp - damage).max(0.0);
+            let mut result = make::<SHitResult>();
+            result.attack_id = 0; // 자기장
+            result.target_id = member.player_id;
+            result.result = HitResult::Hit.raw();
+            result.damage = damage;
+            result.hp_after = member.hp;
+            result.hit_server_ms = now_ms;
+            let died = member.hp <= 0.0;
+            if died {
+                member.dead = true;
+                log!("방 {} 자기장 사망: {}", self.team_code, member.name);
+            }
+            self.broadcast(buffer(&result));
+            if died {
+                died_teams.push(self.members[index].team);
+                self.on_death(index, DeathCause::Zone, 0, now_ms, false);
+            }
+        }
+        if !died_teams.is_empty() {
+            died_teams.dedup();
+            if died_teams.iter().any(|&t| t != died_teams[0]) {
+                self.last_death_team = None; // 여러 팀이 동시에
+            }
+            self.check_winner(now_ms);
+        }
+    }
+
+    /// 사망 처리(HP 0이 된 직후). 매치: 부활 시각을 정하거나 탈락시키고 알린 뒤 승패를 본다. 연습 방은 C_Respawn을 기다린다.
+    /// `check`가 거짓이면 승패 확인을 부른 쪽이 한다(같은 틱에 여러 명이 죽을 때).
+    fn on_death(&mut self, index: usize, cause: DeathCause, killer_id: u32, now_ms: u32, check: bool) {
+        if self.mode != RoomMode::Match {
+            return;
+        }
+        let wait = match self.stage {
+            Stage::Waiting | Stage::Countdown { .. } => Some(self.options.schedule.pregame_respawn_ms),
+            Stage::Running { .. } => self.running(now_ms).and_then(|(phase, _)| phase.respawn_wait_ms),
+            Stage::Ended { end_ms, .. } => Some(end_ms.saturating_sub(now_ms)), // 초기화 때 모두 살아난다
+        };
+        let member = &mut self.members[index];
+        member.respawn_at_ms = wait.map(|w| now_ms + w);
+        member.eliminated = wait.is_none();
+        self.last_death_team = Some(member.team);
+        let mut died = make::<SPlayerDied>();
+        died.player_id = member.player_id;
+        died.killer_id = killer_id;
+        died.cause = cause.raw();
+        died.respawn_server_ms = member.respawn_at_ms.unwrap_or(0);
+        log!("방 {} {}: {} (팀 {}, 원인 {:?})", self.team_code, if member.eliminated { "탈락" } else { "부활 대기" }, member.name, member.team, cause);
+        self.broadcast(buffer(&died));
+        if check {
+            self.check_winner(now_ms);
+        }
+    }
+
+    /// 진행 중에 남은 팀이 1팀 이하(2팀 이상으로 시작했을 때) 또는 0팀이면 끝낸다.
+    fn check_winner(&mut self, now_ms: u32) {
+        let Some((phase, _)) = self.running(now_ms) else { return };
+        let alive = self.alive_teams();
+        let over = if self.started_teams >= 2 { alive.len() <= 1 } else { alive.is_empty() };
+        if !over {
+            return;
+        }
+        let winner = match_rules::winner(&alive, self.last_death_team).unwrap_or(0);
+        let end_ms = now_ms + self.options.schedule.ended_ms;
+        self.stage = Stage::Ended { start_ms: now_ms, end_ms, winner, round: phase.round };
+        if winner == 0 {
+            log!("방 {} 매치 종료: 무승부(동시 전멸, {}라운드)", self.team_code, phase.round);
+        } else {
+            log!("방 {} 매치 종료: 팀 {} 승리 ({}라운드)", self.team_code, winner, phase.round);
+        }
+        self.broadcast_match_state(now_ms);
+    }
+
+    /// 자기장 안 안전한 부활 위치: 후보 중 장애물에 막히지 않고 자기장 안쪽에 있으면서 가장 가까운 적과 가장 먼 곳.
+    /// 후보는 팀 시작 위치와 자기장 안 무작위 점들이다. 쓸 만한 곳이 없으면 자기장 중심 근처.
+    fn safe_respawn_position(&mut self, team: u8, now_ms: u32) -> Vec3 {
+        let radius = self.zone_radius(now_ms);
+        let inner = (radius * 0.75 - 100.0).max(0.0);
+        let enemies: Vec<(f32, f32)> = self.members.iter().filter(|m| m.team != team && !m.dead).map(|m| (m.position.x, m.position.y)).collect();
+        let mut candidates = vec![team_spawn_position(team, 1)];
+        for _ in 0..RESPAWN_CANDIDATES {
+            let angle = self.rng.range(0.0, std::f32::consts::TAU);
+            let distance = inner * self.rng.range(0.0, 1.0).sqrt();
+            candidates.push(Vec3 { x: ZONE_CENTER.0 + distance * angle.cos(), y: ZONE_CENTER.1 + distance * angle.sin(), z: GROUND_Z });
+        }
+        let usable = |p: &Vec3| {
+            let (x, y) = (p.x, p.y);
+            x.abs() <= ARENA_HALF_WIDTH - 100.0
+                && y.abs() <= ARENA_HALF_DEPTH - 100.0
+                && !match_rules::outside_zone(x, y, inner.max(1.0))
+                && !self.options.map.as_ref().is_some_and(|map| map.blocked(Vec3 { x, y, z: 92.0 }, 40.0))
+        };
+        let score = |p: &Vec3| enemies.iter().map(|&(ex, ey)| (p.x - ex).hypot(p.y - ey)).fold(f32::MAX, f32::min);
+        candidates.into_iter().filter(|p| usable(p)).max_by(|a, b| score(a).total_cmp(&score(b))).unwrap_or(Vec3 {
+            x: ZONE_CENTER.0 + 150.0,
+            y: ZONE_CENTER.1,
+            z: GROUND_Z,
+        })
     }
 
     // ---- 몬스터 ----
@@ -788,8 +1175,8 @@ impl Room {
 
     fn update_combat(&mut self, now_ms: u32) {
         // 서버 내려찍기 시험 패턴: 플레이어를 번갈아 노린다.
-        if self.options.pve_slam_interval_ms > 0 && self.mode == RoomMode::PvE && !self.members.is_empty() && now_ms >= self.next_slam_ms {
-            self.next_slam_ms = now_ms + self.options.pve_slam_interval_ms;
+        if self.options.practice_slam_interval_ms > 0 && self.mode == RoomMode::Practice && !self.members.is_empty() && now_ms >= self.next_slam_ms {
+            self.next_slam_ms = now_ms + self.options.practice_slam_interval_ms;
             for _ in 0..self.members.len() {
                 let target = &self.members[self.slam_target % self.members.len()];
                 self.slam_target = self.slam_target.wrapping_add(1);
@@ -811,6 +1198,9 @@ impl Room {
                 let player_id = member.player_id;
                 if player_id == attack.attacker_id || attack.resolved.contains(&player_id) {
                     continue;
+                }
+                if attack.attacker_team != 0 && attack.attacker_team == member.team {
+                    continue; // 같은 팀
                 }
                 if attack.only_target_id != 0 && attack.only_target_id != player_id {
                     continue;
@@ -888,12 +1278,20 @@ impl Room {
         }
         result.hp_after = member.hp;
 
-        // 사망: C_Respawn이 올 때까지 몬스터가 노리지 않고 공격·회피를 받지 않는다.
-        if member.hp <= 0.0 {
+        // 사망: 부활할 때까지(연습 방은 C_Respawn, 매치는 부활 대기 뒤) 몬스터가 노리지 않고 공격·회피를 받지 않는다.
+        let died = member.hp <= 0.0;
+        if died {
             member.dead = true;
             log!("방 {} 사망: {}", team_code, member.name);
         }
         self.broadcast(buffer(&result));
+        if died {
+            let (cause, killer) = match attack.kind {
+                AttackKind::Slash => (DeathCause::Player, attack.attacker_id),
+                _ => (DeathCause::Monster, 0),
+            };
+            self.on_death(index, cause, killer, server_time_ms(), true);
+        }
     }
 
     /// 틱 하나: 몬스터·검기 → 공격 판정 → 이동 확정 상태·묶음 전송.
@@ -907,6 +1305,9 @@ impl Room {
         let now_ms = server_time_ms();
         self.update_monsters(now_ms, dt); // 몬스터가 새 공격을 예고한 뒤
         self.update_combat(now_ms); // 명중 시각이 지난 공격을 판정한다
+        if self.mode == RoomMode::Match {
+            self.update_match(now_ms); // 단계 진행·자기장 피해·부활
+        }
 
         // 입력을 보낸 본인에게 마지막 처리 번호와 확정 상태를 알린다(클라이언트 재조정 기준).
         for member in &mut self.members {
@@ -962,5 +1363,198 @@ impl Room {
             self.monster_sim_max_ms = 0.0;
             self.tick_cost_samples = 0;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::SessionHandle;
+
+    /// 시험용 짧은 시간표: 1~4라운드 1000/1000/1000/1000ms, 축소 500ms, 부활 대기 300/400/500ms
+    fn short_schedule() -> MatchSchedule {
+        MatchSchedule {
+            round_ms: [1000, 1000, 1000, 1000],
+            shrink_ms: 500,
+            countdown_ms: 200,
+            ended_ms: 300,
+            respawn_ms: [300, 400, 500],
+            pregame_respawn_ms: 100,
+            start_teams: 2,
+        }
+    }
+
+    fn match_room() -> Room {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/CombatLab.txt");
+        let options = RoomOptions {
+            match_monsters: false,
+            schedule: short_schedule(),
+            map: Some(Arc::new(CollisionMap::load(&path).unwrap())),
+            ..RoomOptions::default()
+        };
+        Room::new(RoomMode::Match, 1, options)
+    }
+
+    /// 입장시키고 보낸 패킷 수신기를 돌려준다(버리면 송신이 조용히 실패할 뿐 방 동작에는 영향이 없다).
+    fn join(room: &mut Room, id: u32, team: u8) -> mpsc::Receiver<Buffer> {
+        let (session, receiver, _) = SessionHandle::detached(id, 4096);
+        room.enter(session, format!("p{id}"), team);
+        receiver
+    }
+
+    fn member(room: &Room, id: u32) -> &Member {
+        &room.members[room.find(id).unwrap()]
+    }
+
+    fn place(room: &mut Room, id: u32, x: f32, y: f32) {
+        let index = room.find(id).unwrap();
+        let m = &mut room.members[index];
+        m.position = Vec3 { x, y, z: GROUND_Z };
+        m.history.clear();
+        m.history.push_back(PositionSample { server_ms: 0, position: m.position });
+    }
+
+    /// 대기 → 카운트다운 → 1라운드까지 진행하고 1라운드 시작 시각을 돌려준다.
+    fn start(room: &mut Room, now: u32) -> u32 {
+        room.update_match(now);
+        assert!(matches!(room.stage, Stage::Countdown { .. }));
+        room.update_match(now + 200);
+        assert_eq!(room.stage, Stage::Running { start_ms: now + 200 });
+        now + 200
+    }
+
+    fn kill(room: &mut Room, id: u32, now: u32) {
+        let index = room.find(id).unwrap();
+        room.members[index].hp = 0.0;
+        room.members[index].dead = true;
+        room.on_death(index, DeathCause::Monster, 0, now, true);
+    }
+
+    fn received_ids(receiver: &mut mpsc::Receiver<Buffer>) -> Vec<u16> {
+        let mut ids = Vec::new();
+        while let Ok(buffer) = receiver.try_recv() {
+            ids.push(u16::from_le_bytes([buffer[2], buffer[3]]));
+        }
+        ids
+    }
+
+    #[test]
+    fn waits_for_two_teams_then_counts_down_and_starts_at_bases() {
+        let mut room = match_room();
+        let mut a = join(&mut room, 1, 1);
+        assert!(received_ids(&mut a).contains(&PacketId::SMatchState.raw())); // 입장하면 매치 상태를 받는다
+        join(&mut room, 2, 1);
+        room.update_match(1000);
+        assert_eq!(room.stage, Stage::Waiting); // 한 팀뿐
+        join(&mut room, 3, 3);
+        place(&mut room, 1, 0.0, 0.0);
+        let t0 = start(&mut room, 2000);
+        // 1라운드 시작: 팀 시작 위치로
+        let p = member(&room, 1).position;
+        assert_eq!(({ p.x }, { p.y }), ({ team_spawn_position(1, 0).x }, { team_spawn_position(1, 0).y }));
+        assert_eq!((member(&room, 2).team_slot, member(&room, 3).team), (1, 3));
+        let state = room.match_state(t0 + 1);
+        assert_eq!((state.phase, state.round, state.teams_alive, { state.zone_radius_to }), (MatchPhase::Round.raw(), 1, 2, 3700.0));
+        // 1라운드 끝 → 축소
+        let state = room.match_state(t0 + 1100);
+        assert_eq!((state.phase, state.round, { state.zone_radius_from }, { state.zone_radius_to }), (MatchPhase::Shrink.raw(), 1, 3700.0, 2400.0));
+    }
+
+    #[test]
+    fn countdown_returns_to_waiting_when_a_team_leaves() {
+        let mut room = match_room();
+        join(&mut room, 1, 1);
+        join(&mut room, 2, 2);
+        room.update_match(0);
+        assert!(matches!(room.stage, Stage::Countdown { .. }));
+        room.leave(2);
+        room.update_match(100);
+        assert_eq!(room.stage, Stage::Waiting);
+    }
+
+    #[test]
+    fn slash_skips_teammates_and_hits_enemies() {
+        let mut room = match_room();
+        join(&mut room, 1, 1);
+        join(&mut room, 2, 1);
+        join(&mut room, 3, 2);
+        for (id, x) in [(1, 0.0), (2, 100.0), (3, 100.0)] {
+            place(&mut room, id, x, if id == 3 { 60.0 } else { -60.0 });
+        }
+        let center = Vec3 { x: 100.0, y: 0.0, z: GROUND_Z };
+        let mut attack = ActiveAttack::new(AttackKind::Slash, 0, Vec3 { x: 0.0, y: -60.0, z: GROUND_Z }, center, SLASH_RADIUS, SLASH_DAMAGE);
+        attack.attacker_id = 1;
+        attack.attacker_team = 1;
+        room.attacks.push(attack);
+        room.update_combat(10_000);
+        assert_eq!(member(&room, 2).hp, MAX_HP); // 같은 팀
+        assert_eq!(member(&room, 3).hp, MAX_HP - SLASH_DAMAGE); // 다른 팀
+    }
+
+    #[test]
+    fn deaths_in_rounds_1_to_3_respawn_inside_the_zone_after_the_wait() {
+        let mut room = match_room();
+        join(&mut room, 1, 1);
+        join(&mut room, 2, 2);
+        let t0 = start(&mut room, 0);
+        kill(&mut room, 1, t0 + 100); // 1라운드: 300ms 대기
+        assert_eq!((member(&room, 1).respawn_at_ms, member(&room, 1).eliminated), (Some(t0 + 400), false));
+        assert!(matches!(room.stage, Stage::Running { .. })); // 부활할 수 있으니 끝나지 않는다
+        room.update_match(t0 + 399);
+        assert!(member(&room, 1).dead);
+        room.update_match(t0 + 400);
+        let m = member(&room, 1);
+        assert!(!m.dead && m.hp == MAX_HP);
+        assert!(!match_rules::outside_zone(m.position.x, m.position.y, ZONE_RADIUS[0]));
+        assert!(!room.options.map.as_ref().unwrap().blocked(Vec3 { x: m.position.x, y: m.position.y, z: 92.0 }, 32.0));
+        // 3라운드 뒤 축소(4000~4500ms) 중 사망도 마지막 부활 기회(500ms)
+        kill(&mut room, 2, t0 + 4200);
+        assert_eq!((member(&room, 2).respawn_at_ms, member(&room, 2).eliminated), (Some(t0 + 4700), false));
+    }
+
+    #[test]
+    fn round_4_death_eliminates_and_last_team_wins_then_resets() {
+        let mut room = match_room();
+        let mut watcher = join(&mut room, 1, 1);
+        join(&mut room, 2, 2);
+        join(&mut room, 3, 2);
+        let t0 = start(&mut room, 0);
+        let round4 = t0 + 3 * 1000 + 3 * 500 + 10;
+        received_ids(&mut watcher);
+        kill(&mut room, 2, round4);
+        assert!(member(&room, 2).eliminated);
+        assert!(matches!(room.stage, Stage::Running { .. })); // 팀 2에 한 명 남음
+        kill(&mut room, 3, round4 + 50);
+        assert_eq!(room.stage, Stage::Ended { start_ms: round4 + 50, end_ms: round4 + 350, winner: 1, round: 4 });
+        let ids = received_ids(&mut watcher);
+        assert!(ids.contains(&PacketId::SPlayerDied.raw()) && ids.contains(&PacketId::SMatchState.raw()));
+        // 결과 표시가 끝나면 대기로 돌아가고 모두 살아난다
+        room.update_match(round4 + 350);
+        assert_eq!(room.stage, Stage::Waiting);
+        assert!(room.members.iter().all(|m| !m.dead && !m.eliminated && m.hp == MAX_HP));
+    }
+
+    #[test]
+    fn zone_damage_hits_outside_players_and_simultaneous_wipe_is_a_draw() {
+        let mut room = match_room();
+        join(&mut room, 1, 1);
+        join(&mut room, 2, 2);
+        let t0 = start(&mut room, 0);
+        // 1라운드: 반지름 3700 밖(맵 모서리 너머)에 세우면 초당 1%
+        place(&mut room, 1, 3000.0, 2300.0);
+        room.next_zone_damage_ms = 0;
+        room.update_match(t0 + 100);
+        assert_eq!((member(&room, 1).hp, member(&room, 2).hp), (MAX_HP - 1.0, MAX_HP));
+        // 4라운드: 둘 다 밖, 같은 피해 틱에 동시에 죽으면 무승부
+        let round4 = t0 + 3 * 1000 + 3 * 500 + 500;
+        for id in [1, 2] {
+            place(&mut room, id, 1500.0, 0.0);
+            let index = room.find(id).unwrap();
+            room.members[index].hp = 5.0;
+        }
+        room.next_zone_damage_ms = 0;
+        room.update_match(round4);
+        assert!(member(&room, 1).eliminated && member(&room, 2).eliminated);
+        assert!(matches!(room.stage, Stage::Ended { winner: 0, round: 4, .. }));
     }
 }

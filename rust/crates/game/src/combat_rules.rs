@@ -8,13 +8,13 @@
 //! - 명중 판정은 "명중 시각 + 허용 되감기"까지 미뤘다가 확정한다(판정 유예).
 //!   그 안에 도착한 회피는 모두 반영되고, HP를 깎았다 되돌리는 일이 없다.
 
-use asc_protocol::{ModeRules, RoomMode, MAX_PVP_PLAYERS, MAX_ROOM_PLAYERS};
+use asc_protocol::{ModeRules, RoomMode, MAX_MATCH_PLAYERS, MAX_PRACTICE_PLAYERS};
 
-/// PvE: 무적 0.15초는 1인 데모의 손맛 기준값 그대로다. 협동이라 지연이 큰 팀원에게 관대하게 200ms까지 되감는다.
-pub const PVE_RULES: ModeRules = ModeRules { iframe_ms: 150, rewind_cap_ms: 200, dodge_cooldown_ms: 1000, attack_windup_ms: 0 };
-/// PvP: 되감기 상한을 100ms로 줄여 시각 조작으로 얻는 이득을 제한한다. 대신 무적을 0.30초로 늘려
+/// 연습 방: 무적 0.15초는 1인 데모의 손맛 기준값 그대로다. 지연이 큰 사람에게 관대하게 200ms까지 되감는다.
+pub const PRACTICE_RULES: ModeRules = ModeRules { iframe_ms: 150, rewind_cap_ms: 200, dodge_cooldown_ms: 1000, attack_windup_ms: 0 };
+/// 매치(PvP): 되감기 상한을 100ms로 줄여 시각 조작으로 얻는 이득을 제한한다. 대신 무적을 0.30초로 늘려
 /// 왕복 지연 100ms가 무적 시간의 1/3을 넘지 않게 한다. 공격 준비 0.35초는 상대가 예고를 보고 반응할 시간이다.
-pub const PVP_RULES: ModeRules = ModeRules { iframe_ms: 300, rewind_cap_ms: 100, dodge_cooldown_ms: 1000, attack_windup_ms: 350 };
+pub const MATCH_RULES: ModeRules = ModeRules { iframe_ms: 300, rewind_cap_ms: 100, dodge_cooldown_ms: 1000, attack_windup_ms: 350 };
 
 /// 왕복 시간의 절반에 더하는 여유(지연 흔들림).
 pub const JITTER_MARGIN_MS: u32 = 30;
@@ -23,15 +23,15 @@ pub const COOLDOWN_SLACK_MS: u32 = 50;
 
 pub fn rules_for(mode: RoomMode) -> ModeRules {
     match mode {
-        RoomMode::PvP => PVP_RULES,
-        RoomMode::PvE => PVE_RULES,
+        RoomMode::Match => MATCH_RULES,
+        RoomMode::Practice => PRACTICE_RULES,
     }
 }
 
 pub fn capacity_for(mode: RoomMode) -> u8 {
     match mode {
-        RoomMode::PvP => MAX_PVP_PLAYERS,
-        RoomMode::PvE => MAX_ROOM_PLAYERS,
+        RoomMode::Match => MAX_MATCH_PLAYERS,
+        RoomMode::Practice => MAX_PRACTICE_PLAYERS,
     }
 }
 
@@ -61,22 +61,22 @@ mod tests {
 
     #[test]
     fn rules_and_capacity_by_mode() {
-        assert_eq!(rules_for(RoomMode::PvE), PVE_RULES);
-        assert_eq!(rules_for(RoomMode::PvP), PVP_RULES);
-        assert_eq!(capacity_for(RoomMode::PvE), 3);
-        assert_eq!(capacity_for(RoomMode::PvP), 16);
+        assert_eq!(rules_for(RoomMode::Practice), PRACTICE_RULES);
+        assert_eq!(rules_for(RoomMode::Match), MATCH_RULES);
+        assert_eq!(capacity_for(RoomMode::Practice), 3);
+        assert_eq!(capacity_for(RoomMode::Match), 12);
     }
 
     #[test]
     fn rewind_is_half_rtt_plus_margin_up_to_cap() {
-        assert_eq!(allowed_rewind_ms(&PVE_RULES, 0), 200); // 아직 모름 → 상한
-        assert_eq!(allowed_rewind_ms(&PVE_RULES, 1), 30);
-        assert_eq!(allowed_rewind_ms(&PVE_RULES, 100), 80);
-        assert_eq!(allowed_rewind_ms(&PVE_RULES, 340), 200);
-        assert_eq!(allowed_rewind_ms(&PVE_RULES, 2000), 200); // 부풀려도 상한
-        assert_eq!(allowed_rewind_ms(&PVP_RULES, 100), 80);
-        assert_eq!(allowed_rewind_ms(&PVP_RULES, 2000), 100);
-        assert_eq!(allowed_rewind_ms(&PVP_RULES, u32::MAX), 100);
+        assert_eq!(allowed_rewind_ms(&PRACTICE_RULES, 0), 200); // 아직 모름 → 상한
+        assert_eq!(allowed_rewind_ms(&PRACTICE_RULES, 1), 30);
+        assert_eq!(allowed_rewind_ms(&PRACTICE_RULES, 100), 80);
+        assert_eq!(allowed_rewind_ms(&PRACTICE_RULES, 340), 200);
+        assert_eq!(allowed_rewind_ms(&PRACTICE_RULES, 2000), 200); // 부풀려도 상한
+        assert_eq!(allowed_rewind_ms(&MATCH_RULES, 100), 80);
+        assert_eq!(allowed_rewind_ms(&MATCH_RULES, 2000), 100);
+        assert_eq!(allowed_rewind_ms(&MATCH_RULES, u32::MAX), 100);
     }
 
     #[test]
@@ -89,10 +89,10 @@ mod tests {
 
     #[test]
     fn iframe_window_is_inclusive() {
-        assert!(in_iframe(&PVE_RULES, 1000, 1000));
-        assert!(in_iframe(&PVE_RULES, 1000, 1150));
-        assert!(!in_iframe(&PVE_RULES, 1000, 1151));
-        assert!(!in_iframe(&PVE_RULES, 1000, 999)); // 명중 뒤에 누른 회피
-        assert!(in_iframe(&PVP_RULES, 1000, 1300));
+        assert!(in_iframe(&PRACTICE_RULES, 1000, 1000));
+        assert!(in_iframe(&PRACTICE_RULES, 1000, 1150));
+        assert!(!in_iframe(&PRACTICE_RULES, 1000, 1151));
+        assert!(!in_iframe(&PRACTICE_RULES, 1000, 999)); // 명중 뒤에 누른 회피
+        assert!(in_iframe(&MATCH_RULES, 1000, 1300));
     }
 }
