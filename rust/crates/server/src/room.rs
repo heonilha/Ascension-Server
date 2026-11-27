@@ -205,8 +205,12 @@ struct Member {
     rtt_ms: u32,
     /// 최근 회피 몇 개(판정 유예 동안 필요한 만큼)
     dodges: VecDeque<DodgeRecord>,
+    /// 마지막 검기(재사용 대기·충전량 상한 기준)
     last_attack_ms: u32,
     has_attacked: bool,
+    /// 마지막 근접 공격. 검기와 따로 센다: 클라이언트는 공격 한 번에 근접 공격과 0.28초 뒤 검기를 함께 보낸다
+    last_slash_ms: u32,
+    has_slashed: bool,
     history: VecDeque<PositionSample>,
 }
 
@@ -534,6 +538,8 @@ impl Room {
             dodges: VecDeque::new(),
             last_attack_ms: 0,
             has_attacked: false,
+            last_slash_ms: 0,
+            has_slashed: false,
             history: VecDeque::from([PositionSample { server_ms: now_ms, position }]),
         };
 
@@ -724,11 +730,11 @@ impl Room {
 
         // 매치 근접 공격. 시작은 서버 도착 시각 기준이다. 공격 준비 시간이 공격자 쪽 지연을 흡수하므로 되감지 않는다.
         let member = &mut self.members[index];
-        if member.has_attacked && now_ms.wrapping_sub(member.last_attack_ms) < SLASH_COOLDOWN_MS {
+        if member.has_slashed && now_ms.wrapping_sub(member.last_slash_ms) < SLASH_COOLDOWN_MS {
             return;
         }
-        member.has_attacked = true;
-        member.last_attack_ms = now_ms;
+        member.has_slashed = true;
+        member.last_slash_ms = now_ms;
 
         let radians = yaw * std::f32::consts::PI / 180.0;
         let origin = member.position;
@@ -1632,6 +1638,25 @@ mod tests {
         room.stage = Stage::Ended { start_ms: t0, end_ms: t0 + 2000, winner: 1, round: 1 };
         room.update_match(t0 + 2000);
         assert!(room.members.iter().all(|m| m.progress == Progress::default()));
+    }
+
+    #[test]
+    fn slash_and_wave_cooldowns_are_separate() {
+        let mut room = match_room();
+        room.options.match_monsters = true;
+        room.monsters = Some(MonsterField::new(room.options.map.clone(), 1, 0));
+        join(&mut room, 1, 1);
+        let mut packet = make::<CAttack>();
+        packet.kind = AttackKind::Slash.raw();
+        room.attack(1, &packet);
+        // 같은 공격 동작에서 0.28초 뒤 나가는 검기는 근접 공격의 재사용 대기에 걸리지 않는다
+        packet.kind = AttackKind::Wave.raw();
+        let before = room.monsters.as_ref().unwrap().wave_count();
+        room.attack(1, &packet);
+        assert_eq!(room.monsters.as_ref().unwrap().wave_count(), before + 1);
+        // 검기끼리는 0.6초 간격
+        room.attack(1, &packet);
+        assert_eq!(room.monsters.as_ref().unwrap().wave_count(), before + 1);
     }
 
     #[test]
