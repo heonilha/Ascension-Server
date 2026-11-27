@@ -64,8 +64,8 @@ fn run() -> ExitCode {
     log!(
         "매치: 시간 배율 {} (한 판 {}초), 경험치 배율 {}, {}팀 이상이면 시작, 몬스터 {}",
         time_scale,
-        options.xp_scale,
         options.schedule.total_ms() / 1000,
+        options.xp_scale,
         options.schedule.start_teams,
         if options.match_monsters { "켬" } else { "끔" }
     );
