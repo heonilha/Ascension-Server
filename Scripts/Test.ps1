@@ -43,10 +43,10 @@ $scenarios = [ordered]@{
     'practice_stamp_cheat' = '--dodge-test --dodge-cheat --bots 1 --seconds 16 --team-base 1005'
     'practice_rtt_lie'     = '--dodge-test --dodge-cheat --rtt-lie 2000 --bots 1 --seconds 16 --team-base 1006'
     # dodge judgement, match (bot 0 attacks bot 1, different teams)
-    'match_dodge_L0'    = '--mode match --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 0 --team-base 1100'
-    'match_dodge_L50'   = '--mode match --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 50 --team-base 1101'
-    'match_dodge_L100'  = '--mode match --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 100 --team-base 1102'
-    'match_dodge_L150'  = '--mode match --dodge-test --bots 2 --team-size 2 --seconds 14 --latency 150 --team-base 1103'
+    'match_dodge_L0'    = '--mode match --dodge-test --bots 2 --team-size 2 --seconds 26 --latency 0 --team-base 1100'
+    'match_dodge_L50'   = '--mode match --dodge-test --bots 2 --team-size 2 --seconds 26 --latency 50 --team-base 1101'
+    'match_dodge_L100'  = '--mode match --dodge-test --bots 2 --team-size 2 --seconds 26 --latency 100 --team-base 1102'
+    'match_dodge_L150'  = '--mode match --dodge-test --bots 2 --team-size 2 --seconds 26 --latency 150 --team-base 1103'
     'match_stamp_cheat' = '--mode match --dodge-test --dodge-cheat --bots 2 --team-size 2 --seconds 16 --team-base 1104'
     'match_rtt_lie'     = '--mode match --dodge-test --dodge-cheat --rtt-lie 2000 --bots 2 --team-size 2 --seconds 16 --team-base 1105'
 }
@@ -84,8 +84,8 @@ try {
 
     # Golden records: what the C++ build computes now must equal the committed record the Rust tests compare against.
     $goldens = [ordered]@{
-        'movement_golden' = 'rust\crates\movement\tests\golden\movement_v6.txt' # shared movement header (FFI)
-        'game_golden'     = 'rust\crates\game\tests\golden\game_v6.txt'         # collision map + monsters (ported to Rust)
+        'movement_golden' = 'rust\crates\movement\tests\golden\movement_v7.txt' # shared movement header (FFI)
+        'game_golden'     = 'rust\crates\game\tests\golden\game_v7.txt'         # collision map + monsters (ported to Rust)
     }
     foreach ($name in $goldens.Keys) {
         $goldenFile = Join-Path $root $goldens[$name]

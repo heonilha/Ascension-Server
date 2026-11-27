@@ -36,9 +36,26 @@ impl Obstacle {
     }
 }
 
+/// 맵 배치 표식(`area <kind> <index> <x> <y> <radius>` 줄): 풀숲·캠프·균열 입구·균열 전투장. 막지 않는다.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Area {
+    pub kind: String,
+    pub index: u32,
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+}
+
+impl Area {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        (x - self.x).hypot(y - self.y) <= self.radius
+    }
+}
+
 pub struct CollisionMap {
     world: World,
     obstacles: Vec<Obstacle>,
+    areas: Vec<Area>,
 }
 
 fn flat(v: Vec3) -> Vec2 {
@@ -92,7 +109,28 @@ impl CollisionMap {
                 max_y,
             });
         }
-        Ok(CollisionMap { world, obstacles })
+        let mut areas = Vec::new();
+        for (number, line) in text.lines().enumerate() {
+            let mut words = line.split_whitespace();
+            if words.next() != Some("area") {
+                continue;
+            }
+            let fields: Vec<&str> = words.collect();
+            let bad = || format!("area 줄 {}", number + 1);
+            if fields.len() != 5 {
+                return Err(bad());
+            }
+            let number = |i: usize| fields[i].parse::<f32>().map_err(|_| bad());
+            areas.push(Area { kind: fields[0].to_string(), index: fields[1].parse().map_err(|_| bad())?, x: number(2)?, y: number(3)?, radius: number(4)? });
+        }
+        areas.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.index.cmp(&b.index)));
+        Ok(CollisionMap { world, obstacles, areas })
+    }
+
+    /// 배치 표식 중 `kind` 종류(번호 순)
+    pub fn areas(&self, kind: &str) -> impl Iterator<Item = &Area> {
+        let kind = kind.to_string();
+        self.areas.iter().filter(move |a| a.kind == kind)
     }
 
     /// 이동 계산(`asc_movement::step`)에 넘기는 지형.

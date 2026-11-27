@@ -3,6 +3,9 @@
 //! 매치: 몬스터 사냥 + 팀 간 전투. 같은 팀끼리는 공격이 맞지 않는다. 대기 → 카운트다운 → 1~4라운드(사이마다 자기장 축소)
 //! → 최후의 1팀 → 결과 표시 뒤 다시 대기. 시간표·자기장·부활 대기는 `asc_game::match_rules`가 정한다.
 //!
+//! 매치 필드(`asc_game::field`): 캠프 몬스터(맞기 전에는 가만히 있다), 풀숲(밖의 적에게 숨는다, `visibility.rs`),
+//! 2라운드의 균열(`rift.rs`). 스킬·스탯 포인트 쓰기는 `loadout.rs`.
+//!
 //! 방의 상태는 방 태스크 하나만 가진다. 세션은 `RoomHandle`로 명령을 보내고, 방 태스크가 받은 순서대로 처리한다.
 //! 명령 처리 사이사이에 20Hz 틱이 돈다. 서로 다른 방은 다른 태스크라서 여러 스레드에서 동시에 돌아간다.
 //! 방으로 가는 `RoomHandle`이 모두 사라지면(마지막 사람이 나가고 `RoomManager`가 지우면) 방 태스크가 끝난다.
@@ -10,7 +13,13 @@
 use crate::clock::server_time_ms;
 use crate::log;
 use crate::session::{Buffer, SessionHandle};
+mod loadout;
+mod rift;
+mod visibility;
+
 use asc_game::combat_rules::{allowed_rewind_ms, capacity_for, clamp_press_time, in_iframe, rules_for, COOLDOWN_SLACK_MS};
+use asc_game::field::FieldLayout;
+use asc_game::loadout::Loadout;
 use asc_game::match_rules::{self, running_phase, MatchSchedule, RunningPhase, ZONE_CENTER, ZONE_RADIUS};
 use asc_game::monsters::{tuning, MonsterEvents, MonsterField, MonsterPlayer};
 use asc_game::progression::{self, Progress, MONSTER_XP};
@@ -20,7 +29,7 @@ use asc_game::CollisionMap;
 use asc_movement::{World, GROUND_Z, RADIUS, TICK_RATE};
 use asc_protocol::*;
 use bytemuck::Zeroable;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -129,6 +138,14 @@ pub enum RoomCommand {
     Respawn {
         player_id: u32,
     },
+    Skill {
+        player_id: u32,
+        packet: CSkillCommand,
+    },
+    Stat {
+        player_id: u32,
+        packet: CStatCommand,
+    },
 }
 
 /// 방에 명령을 보내는 손잡이.
@@ -212,6 +229,21 @@ struct Member {
     last_slash_ms: u32,
     has_slashed: bool,
     history: VecDeque<PositionSample>,
+
+    /// 배운 스킬·분배한 스탯(한 판 동안 유지)
+    loadout: Loadout,
+    /// 마지막으로 피해를 주고받은 시각(스킬 지우기는 전투 중 불가)
+    last_combat_ms: Option<u32>,
+    /// 들어가 있는 풀숲
+    bush: Option<usize>,
+    /// 공격하면 이 시각까지 풀숲 안에서도 보인다
+    revealed_until_ms: u32,
+    /// 균열 안: 들어온 입구 번호
+    rift_gate: Option<usize>,
+    /// 이 판에서 균열에 들어갔었다(다시 못 들어간다)
+    rift_used: bool,
+    /// 균열 입구에 서 있기 시작한 (입구, 시각)
+    gate_hold: Option<(usize, u32)>,
 }
 
 struct ActiveAttack {
@@ -310,6 +342,11 @@ struct Room {
     next_match_state_ms: u32,
     next_zone_damage_ms: u32,
     rng: Rng,
+    /// 필드 배치(캠프·풀숲·균열). 지형 파일의 표식에서 읽는다
+    layout: FieldLayout,
+    rift: rift::Rift,
+    /// (받는 사람, 숨은 사람): 지금 숨김 상태로 알린 쌍
+    hidden_pairs: HashSet<(u32, u32)>,
     // 틱 처리 시간 통계(10초마다 로그)
     tick_cost_sum_ms: f64,
     tick_cost_max_ms: f64,
@@ -380,6 +417,7 @@ fn position_at(member: &Member, server_ms: u32) -> Vec3 {
 
 impl Room {
     fn new(mode: RoomMode, team_code: u32, options: RoomOptions) -> Room {
+        let layout = if mode == RoomMode::Match { FieldLayout::from_map(options.map.as_deref()) } else { FieldLayout::default() };
         Room {
             members: Vec::new(),
             attacks: Vec::new(),
@@ -403,6 +441,9 @@ impl Room {
             next_match_state_ms: 0,
             next_zone_damage_ms: 0,
             rng: Rng::new(team_code.wrapping_mul(2246822519) ^ 0x5bd1_e995),
+            layout,
+            rift: rift::Rift::default(),
+            hidden_pairs: HashSet::new(),
             tick_cost_sum_ms: 0.0,
             tick_cost_max_ms: 0.0,
             monster_sim_sum_ms: 0.0,
@@ -419,7 +460,13 @@ impl Room {
             RoomMode::Match => self.options.match_monsters,
         };
         if monsters {
-            self.monsters = Some(MonsterField::new(self.options.map.clone(), self.team_code.wrapping_mul(2654435761) ^ now_ms, now_ms));
+            let mut field = MonsterField::new(self.options.map.clone(), self.team_code.wrapping_mul(2654435761) ^ now_ms, now_ms);
+            if self.mode == RoomMode::Match {
+                // 매치 필드: 증원 대신 캠프. 캠프 몬스터는 공격받기 전에는 쫓지 않는다
+                field.set_spawning(false);
+                field.set_camps(&self.layout.camps, now_ms);
+            }
+            self.monsters = Some(field);
         }
         let (iframe_ms, rewind_cap_ms) = (self.rules.iframe_ms, self.rules.rewind_cap_ms);
         log!(
@@ -470,6 +517,8 @@ impl Room {
                 }
             }
             RoomCommand::Respawn { player_id } => self.respawn(player_id),
+            RoomCommand::Skill { player_id, packet } => self.skill_command(player_id, &packet),
+            RoomCommand::Stat { player_id, packet } => self.stat_command(player_id, &packet),
         }
     }
 
@@ -541,6 +590,13 @@ impl Room {
             last_slash_ms: 0,
             has_slashed: false,
             history: VecDeque::from([PositionSample { server_ms: now_ms, position }]),
+            loadout: Loadout::default(),
+            last_combat_ms: None,
+            bush: None,
+            revealed_until_ms: 0,
+            rift_gate: None,
+            rift_used: false,
+            gate_hold: None,
         };
 
         // 새로 온 사람에게: 입장 결과 + 판정 규칙 + 이미 있던 사람들
@@ -576,6 +632,10 @@ impl Room {
         }
         let newcomer = self.members.last().expect("방금 넣었다");
         self.broadcast(buffer(&progress_packet(newcomer, 0, ProgressReason::None, 0)));
+        self.send_loadout(self.members.len() - 1, LoadoutResult::Ok, 0, 0);
+        if self.mode == RoomMode::Match {
+            session.send(buffer(&self.rift_state(now_ms)));
+        }
     }
 
     /// 경험치를 주고 모두에게 알린다(배율 적용, 최소 1).
@@ -591,15 +651,23 @@ impl Room {
         }
         let packet = progress_packet(member, amount, reason, levels);
         self.broadcast(buffer(&packet));
+        if levels > 0 {
+            self.send_loadout(index, LoadoutResult::Ok, 0, 0); // 남은 포인트가 늘었다
+        }
     }
 
     /// 한 판을 새로 시작할 때 모두 1레벨로
     fn reset_progress(&mut self) {
         for member in &mut self.members {
             member.progress = Progress::default();
+            member.loadout = Loadout::default();
+            member.last_combat_ms = None;
         }
         for member in &self.members {
             self.broadcast(buffer(&progress_packet(member, 0, ProgressReason::None, 0)));
+        }
+        for index in 0..self.members.len() {
+            self.send_loadout(index, LoadoutResult::Ok, 0, 0);
         }
     }
 
@@ -608,6 +676,7 @@ impl Room {
         let member = self.members.remove(index);
         log!("방 {} 퇴장: {}", self.team_code, member.name);
 
+        self.hidden_pairs.retain(|&(viewer, target)| viewer != player_id && target != player_id);
         let mut left = make::<SPlayerLeft>();
         left.player_id = player_id;
         self.broadcast(buffer(&left));
@@ -735,6 +804,7 @@ impl Room {
         }
         member.has_slashed = true;
         member.last_slash_ms = now_ms;
+        member.revealed_until_ms = now_ms + visibility::ATTACK_REVEAL_MS;
 
         let radians = yaw * std::f32::consts::PI / 180.0;
         let origin = member.position;
@@ -766,6 +836,7 @@ impl Room {
         }
         member.has_attacked = true;
         member.last_attack_ms = now_ms;
+        member.revealed_until_ms = now_ms + visibility::ATTACK_REVEAL_MS;
 
         let radians = yaw * std::f32::consts::PI / 180.0;
         let (x, y) = (member.position.x + WAVE_MUZZLE * radians.cos(), member.position.y + WAVE_MUZZLE * radians.sin());
@@ -806,6 +877,8 @@ impl Room {
         member.dead = false;
         member.eliminated = false;
         member.respawn_at_ms = None;
+        member.rift_gate = None;
+        member.gate_hold = None;
         member.hp = MAX_HP;
         member.protected_until_ms = now_ms + RESPAWN_PROTECTION_MS;
         member.position = position;
@@ -825,6 +898,31 @@ impl Room {
         packet.position = member.position;
         packet.hp = member.hp;
         log!("방 {} 부활: {}", self.team_code, member.name);
+        self.broadcast(buffer(&packet));
+    }
+
+    /// 위치만 옮긴다(HP 그대로, 균열 입장·퇴장). 본인은 S_MoveAck의 새 상태로 재조정된다.
+    fn teleport(&mut self, index: usize, position: Vec3, yaw: f32, reason: TeleportReason, now_ms: u32) {
+        let member = &mut self.members[index];
+        member.position = position;
+        member.velocity = Vec3::zeroed();
+        member.yaw = yaw;
+        member.sim = MoveSimState::zeroed();
+        member.sim.x = position.x;
+        member.sim.y = position.y;
+        member.dodges.clear();
+        member.history.clear();
+        member.history.push_back(PositionSample { server_ms: now_ms, position });
+        member.gate_hold = None;
+        member.dirty = true;
+        member.ack_dirty = true;
+        let mut packet = make::<STeleport>();
+        packet.player_id = member.player_id;
+        packet.position = position;
+        packet.yaw = yaw;
+        packet.reason = reason.raw();
+        let (x, y) = (position.x, position.y);
+        log!("방 {} 순간 이동({:?}): {} → ({:.0}, {:.0})", self.team_code, reason, member.name, x, y);
         self.broadcast(buffer(&packet));
     }
 
@@ -953,7 +1051,9 @@ impl Room {
                 if now_ms >= self.next_zone_damage_ms {
                     self.next_zone_damage_ms = now_ms + ZONE_DAMAGE_INTERVAL_MS;
                     self.apply_zone_damage(now_ms);
+                    self.apply_rift_zone_damage(now_ms);
                 }
+                self.update_rift(now_ms);
             }
             Stage::Ended { end_ms, .. } => {
                 if now_ms >= end_ms {
@@ -978,6 +1078,7 @@ impl Room {
         if self.sent_match_key != Some(key) || now_ms >= self.next_match_state_ms {
             self.broadcast_match_state(now_ms);
         }
+        self.maybe_broadcast_rift_state(now_ms);
     }
 
     /// 1라운드 시작: 모두 살려 팀 시작 위치로 옮긴다.
@@ -987,8 +1088,12 @@ impl Room {
         self.last_death_team = None;
         self.next_zone_damage_ms = now_ms + ZONE_DAMAGE_INTERVAL_MS;
         log!("방 {} 매치 시작: {}팀 {}명, 총 {}초", self.team_code, self.started_teams, self.members.len(), self.options.schedule.total_ms() / 1000);
+        self.reset_rift(now_ms);
         self.revive_everyone_at_bases(now_ms);
         self.reset_progress(); // 시작 전에 모은 경험치는 이어지지 않는다
+        if let Some(monsters) = &mut self.monsters {
+            monsters.set_camps(&self.layout.camps, now_ms); // 새 판: 캠프를 모두 새로 채운다
+        }
     }
 
     /// 결과 표시가 끝났다: 다음 판을 위해 대기로 돌아간다.
@@ -996,6 +1101,7 @@ impl Room {
         self.stage = Stage::Waiting;
         self.started_teams = 0;
         log!("방 {} 매치 초기화 → 대기", self.team_code);
+        self.reset_rift(now_ms);
         self.revive_everyone_at_bases(now_ms);
         self.reset_progress();
     }
@@ -1019,8 +1125,8 @@ impl Room {
         let mut died_teams: Vec<u8> = Vec::new();
         for index in 0..self.members.len() {
             let member = &mut self.members[index];
-            if member.dead || !match_rules::outside_zone(member.position.x, member.position.y, radius) {
-                continue;
+            if member.dead || member.rift_gate.is_some() || !match_rules::outside_zone(member.position.x, member.position.y, radius) {
+                continue; // 균열 안은 전투장 자기장(rift.rs)만 받는다
             }
             member.hp = (member.hp - damage).max(0.0);
             let mut result = make::<SHitResult>();
@@ -1056,11 +1162,17 @@ impl Room {
         if self.mode != RoomMode::Match {
             return;
         }
+        let in_rift = self.members[index].rift_gate.is_some();
         let wait = match self.stage {
             Stage::Waiting | Stage::Countdown { .. } => Some(self.options.schedule.pregame_respawn_ms),
+            // 균열 안에서 죽으면 탈락 없이 밖에서 부활한다(20초)
+            Stage::Running { .. } if in_rift => Some(self.options.schedule.rift.respawn_ms),
             Stage::Running { .. } => self.running(now_ms).and_then(|(phase, _)| phase.respawn_wait_ms),
             Stage::Ended { end_ms, .. } => Some(end_ms.saturating_sub(now_ms)), // 초기화 때 모두 살아난다
         };
+        if in_rift {
+            self.rift_member_died(index, now_ms);
+        }
         let member = &mut self.members[index];
         member.respawn_at_ms = wait.map(|w| now_ms + w);
         member.eliminated = wait.is_none();
@@ -1127,8 +1239,11 @@ impl Room {
 
     fn update_monsters(&mut self, now_ms: u32, dt: f32) {
         let Some(monsters) = &mut self.monsters else { return };
-        let players: Vec<MonsterPlayer> =
-            self.members.iter().map(|m| MonsterPlayer { id: m.player_id, x: m.position.x, y: m.position.y, alive: !m.dead }).collect();
+        let players: Vec<MonsterPlayer> = self
+            .members
+            .iter()
+            .map(|m| MonsterPlayer { id: m.player_id, x: m.position.x, y: m.position.y, alive: !m.dead, zone: m.rift_gate.is_some() as u8 })
+            .collect();
 
         let mut events = std::mem::take(&mut self.monster_events);
         events.clear();
@@ -1191,14 +1306,20 @@ impl Room {
                 start.hit_server_ms = tell.hit_ms; // 출발 시각
                 start.center = at;
                 start.radius = tuning::DASH_SPEED * tuning::DASH_MS as f32 / 1000.0; // 돌진 거리
-                start.damage = tuning::DASH_DAMAGE;
+                start.damage = tuning::DASH_DAMAGE * tell.power;
                 start.monster_id = tell.monster_id;
                 start.yaw = tell.yaw;
                 self.broadcast(buffer(&start));
                 self.monster_attacks.insert(tell.monster_id, attack_id);
             } else {
-                let mut attack =
-                    ActiveAttack::new(AttackKind::MonsterArc, tell.hit_ms, at, at, tuning::ARC_RANGE - BODY_RADIUS, tuning::ARC_DAMAGE[tell.kind as usize]);
+                let mut attack = ActiveAttack::new(
+                    AttackKind::MonsterArc,
+                    tell.hit_ms,
+                    at,
+                    at,
+                    tuning::ARC_RANGE - BODY_RADIUS,
+                    tuning::ARC_DAMAGE[tell.kind as usize] * tell.power,
+                );
                 attack.yaw = tell.yaw;
                 attack.half_angle = tuning::ARC_HALF_ANGLE;
                 attack.monster_id = tell.monster_id;
@@ -1209,7 +1330,8 @@ impl Room {
         // 돌진 접촉: 닿은 순간이 명중 시각이다. 그 플레이어만, 회피 무적·지연 보정을 거쳐 판정한다.
         for touch in &events.dash_touches {
             let at = Vec3 { x: touch.x, y: touch.y, z: GROUND_Z };
-            let mut attack = ActiveAttack::new(AttackKind::MonsterCharge, now_ms, at, at, tuning::DASH_HIT_DISTANCE - BODY_RADIUS, tuning::DASH_DAMAGE);
+            let mut attack =
+                ActiveAttack::new(AttackKind::MonsterCharge, now_ms, at, at, tuning::DASH_HIT_DISTANCE - BODY_RADIUS, tuning::DASH_DAMAGE * touch.power);
             attack.monster_id = touch.monster_id;
             attack.only_target_id = touch.player_id;
             self.start_attack(attack, now_ms, false);
@@ -1223,10 +1345,12 @@ impl Room {
             packet.x = hit.x;
             packet.y = hit.y;
             self.broadcast(buffer(&packet));
+            self.mark_combat(hit.attacker_id, now_ms);
             if hit.hp_after <= 0.0 {
                 self.monster_attacks.remove(&hit.monster_id);
                 // 처치한 사람(막타)에게 경험치
                 self.award_xp(hit.attacker_id, MONSTER_XP[(hit.kind as usize).min(2)], ProgressReason::Monster);
+                self.on_monster_killed(hit.monster_id, now_ms);
             }
         }
         for end in &events.wave_ends {
@@ -1339,6 +1463,7 @@ impl Room {
             result.result = HitResult::Hit.raw();
             result.damage = attack.damage;
             member.hp = (member.hp - attack.damage).max(0.0);
+            member.last_combat_ms = Some(attack.hit_ms);
             log!("방 {} 판정: 공격 {} → {} 피격 {:.0} (HP {:.0})", team_code, attack.attack_id, member.name, attack.damage, member.hp);
         }
         result.hp_after = member.hp;
@@ -1350,6 +1475,9 @@ impl Room {
             log!("방 {} 사망: {}", team_code, member.name);
         }
         self.broadcast(buffer(&result));
+        if result.result == HitResult::Hit.raw() {
+            self.mark_combat(attack.attacker_id, attack.hit_ms);
+        }
         if died {
             let (cause, killer) = match attack.kind {
                 AttackKind::Slash => (DeathCause::Player, attack.attacker_id),
@@ -1394,20 +1522,7 @@ impl Room {
             member.session.send_packet(&ack);
         }
 
-        let mut entries: Vec<MoveEntry> = Vec::new();
-        for member in &mut self.members {
-            if !member.dirty {
-                continue;
-            }
-            member.dirty = false;
-            entries.push(MoveEntry { player_id: member.player_id, position: member.position, velocity: member.velocity, yaw: member.yaw, state: member.state });
-        }
-        if !entries.is_empty() {
-            // 모두에게 같은 버퍼를 보낸다. 클라이언트는 자기 playerId 항목을 무시한다.
-            let mut batch = make::<SMoveBatch>();
-            batch.server_tick = self.tick;
-            self.broadcast(encode_with_entries(batch, &entries).into());
-        }
+        self.send_move_batches(now_ms); // 풀숲에 숨은 사람은 받는 사람마다 다르게(visibility.rs)
 
         // 부하 기록: 몬스터가 있는 방의 틱 처리 시간을 10초마다 남긴다.
         let cost_ms = tick_start.elapsed().as_secs_f64() * 1000.0;
@@ -1454,6 +1569,19 @@ mod tests {
             respawn_ms: [300, 400, 500],
             pregame_respawn_ms: 100,
             start_teams: 2,
+            // 균열: 2라운드 시작 200ms 뒤 열림, 대기 300, 대결 1000(500부터 축소, 800부터 큰 피해), 합류 200, 보스 800, 부활 200
+            rift: match_rules::RiftSchedule {
+                open_after_round2_ms: 200,
+                wait_ms: 300,
+                pvp_ms: 1000,
+                pvp_shrink_ms: 500,
+                pvp_late_ms: 800,
+                join_grace_ms: 200,
+                boss_ms: 800,
+                respawn_ms: 200,
+                result_ms: 100,
+                enter_hold_ms: 100,
+            },
         }
     }
 
@@ -1511,6 +1639,179 @@ mod tests {
         ids
     }
 
+    /// 받은 패킷 중 `T`만 꺼낸다(고정 부분과 뒤에 붙은 바이트)
+    fn received<T: Packet>(receiver: &mut mpsc::Receiver<Buffer>) -> Vec<(T, Vec<u8>)> {
+        let mut out = Vec::new();
+        while let Ok(buffer) = receiver.try_recv() {
+            if u16::from_le_bytes([buffer[2], buffer[3]]) == T::ID.raw() {
+                let (packet, tail) = read::<T>(&buffer).expect("packet");
+                out.push((packet, tail.to_vec()));
+            }
+        }
+        out
+    }
+
+    /// 받은 이동 묶음의 항목 전부
+    fn move_entries(receiver: &mut mpsc::Receiver<Buffer>) -> Vec<MoveEntry> {
+        let mut entries = Vec::new();
+        for (_, mut tail) in received::<SMoveBatch>(receiver) {
+            while let Some((entry, rest)) = read::<MoveEntry>(&tail) {
+                entries.push(entry);
+                tail = rest.to_vec();
+            }
+        }
+        entries
+    }
+
+    #[test]
+    fn bush_hides_players_from_enemies_outside() {
+        let mut room = match_room();
+        let mut enemy = join(&mut room, 1, 1);
+        join(&mut room, 2, 2);
+        let mut ally = join(&mut room, 3, 2);
+        // 풀숲 16: (1150, -550) 반지름 260
+        place(&mut room, 2, 1150.0, -550.0);
+        place(&mut room, 1, 1150.0, 200.0); // 7.5m 밖
+        place(&mut room, 3, 1150.0, 300.0);
+        move_entries(&mut enemy);
+        move_entries(&mut ally);
+        room.send_move_batches(1000);
+        let seen = |entries: &[MoveEntry]| entries.iter().find(|e| { e.player_id } == 2).map(|e| e.state);
+        assert_eq!(seen(&move_entries(&mut enemy)), Some(MoveState::Hidden.raw()), "enemy_gets_hidden_once");
+        assert_eq!(seen(&move_entries(&mut ally)), None, "ally_sees_normally_no_hidden_entry");
+        // 숨어 있는 동안 움직여도 적은 위치를 받지 않는다
+        let index = room.find(2).unwrap();
+        room.members[index].dirty = true;
+        room.send_move_batches(1050);
+        assert_eq!(seen(&move_entries(&mut enemy)), None, "no_updates_while_hidden");
+        // 3m 안으로 다가오면 보인다
+        place(&mut room, 1, 1150.0, -300.0);
+        room.send_move_batches(1100);
+        assert_eq!(seen(&move_entries(&mut enemy)), Some(MoveState::Idle.raw()), "close_enemy_sees");
+        // 멀어지면 다시 숨고, 공격하면 1.5초 드러난다
+        place(&mut room, 1, 1150.0, 200.0);
+        room.send_move_batches(1150);
+        assert_eq!(seen(&move_entries(&mut enemy)), Some(MoveState::Hidden.raw()));
+        let index = room.find(2).unwrap();
+        room.members[index].revealed_until_ms = 1200 + visibility::ATTACK_REVEAL_MS;
+        room.send_move_batches(1200);
+        assert_eq!(seen(&move_entries(&mut enemy)), Some(MoveState::Idle.raw()), "attack_reveals");
+    }
+
+    /// 균열 시각까지 진행: 2라운드 시작 + 200ms
+    fn open_rift(room: &mut Room) -> u32 {
+        let t0 = start(room, 0);
+        let open = t0 + 1000 + 500 + 200;
+        room.update_match(open);
+        assert!(matches!(room.rift.stage, rift::RiftStage::Open { .. }));
+        open
+    }
+
+    /// 입구에 세우고 입장에 필요한 시간만큼 진행한다
+    fn walk_into_gate(room: &mut Room, id: u32, gate: usize, now: u32) -> u32 {
+        let g = room.layout.rift_gates[gate];
+        place(room, id, g.x, g.y);
+        room.update_match(now);
+        room.update_match(now + 100);
+        now + 100
+    }
+
+    #[test]
+    fn rift_duel_rewards_the_winning_team_and_returns_them() {
+        let mut room = match_room();
+        join(&mut room, 1, 1);
+        join(&mut room, 2, 2);
+        let mut now = open_rift(&mut room);
+        now = walk_into_gate(&mut room, 1, 0, now + 10);
+        assert_eq!(member(&room, 1).rift_gate, Some(0));
+        assert!(member(&room, 1).position.y > 5000.0, "teleported_to_arena");
+        assert!(matches!(room.rift.stage, rift::RiftStage::Waiting { .. }));
+        // 다른 팀은 이미 차지한 입구로 못 들어간다
+        now = walk_into_gate(&mut room, 2, 0, now + 10);
+        assert_eq!(member(&room, 2).rift_gate, None, "gate_taken_by_other_team");
+        now = walk_into_gate(&mut room, 2, 1, now + 10);
+        assert!(matches!(room.rift.stage, rift::RiftStage::Pvp { .. }), "second_team_starts_duel");
+        let stats_before = member(&room, 1).progress.stat_points;
+        kill(&mut room, 2, now + 10);
+        assert!(member(&room, 2).rift_used && member(&room, 2).respawn_at_ms == Some(now + 10 + 200), "rift_death_respawns_outside_later");
+        room.update_match(now + 20);
+        assert!(matches!(room.rift.stage, rift::RiftStage::Finished { winner: 1, .. }));
+        // 경험치 400으로 오른 레벨마다 3 + 균열 보상 3
+        let progress = member(&room, 1).progress;
+        assert!(progress.level > 1, "winner_gets_xp");
+        assert_eq!(progress.stat_points, stats_before + 3 * (progress.level as u16 - 1) + 3, "winner_gets_3_bonus_stats");
+        let p = member(&room, 1).position;
+        assert!(member(&room, 1).rift_gate.is_none() && { p.y } < 1000.0, "winner_back_at_gate");
+        // 패배 팀은 밖에서 부활하고 다시 들어갈 수 없다
+        room.update_match(now + 300);
+        assert!(!member(&room, 2).dead && { member(&room, 2).position.y } < 5000.0);
+        walk_into_gate(&mut room, 2, 1, now + 400);
+        assert_eq!(member(&room, 2).rift_gate, None);
+    }
+
+    #[test]
+    fn rift_alone_ends_without_opponent_and_unused_rift_closes() {
+        let mut room = match_room();
+        join(&mut room, 1, 1);
+        join(&mut room, 2, 2);
+        let mut now = open_rift(&mut room);
+        now = walk_into_gate(&mut room, 1, 0, now + 10);
+        // 대기 300ms가 지나면 보스전. 몬스터를 끈 방이라 보상 없이 끝나고 밖으로 나온다
+        room.update_match(now + 310);
+        assert!(matches!(room.rift.stage, rift::RiftStage::Finished { winner: 0, .. }));
+        assert!(member(&room, 1).rift_gate.is_none() && { member(&room, 1).position.y } < 1000.0);
+
+        // 아무도 안 들어가면 2라운드가 끝날 때 닫힌다
+        let mut room = match_room();
+        join(&mut room, 1, 1);
+        join(&mut room, 2, 2);
+        let open = open_rift(&mut room);
+        room.update_match(open + 900); // 2라운드(1500~2500) 끝 → 축소
+        assert_eq!(room.rift.stage, rift::RiftStage::Closed);
+        let g = room.layout.rift_gates[0];
+        place(&mut room, 1, g.x, g.y);
+        room.update_match(open + 950);
+        room.update_match(open + 1100);
+        assert_eq!(member(&room, 1).rift_gate, None, "closed_rift_cannot_be_entered");
+    }
+
+    #[test]
+    fn skill_and_stat_commands_follow_the_rules() {
+        let mut room = match_room();
+        let mut rx = join(&mut room, 1, 1);
+        let last = |rx: &mut mpsc::Receiver<Buffer>| received::<SLoadout>(rx).pop().expect("loadout").0;
+        assert_eq!({ last(&mut rx).skill_points_left }, 1, "loadout_on_enter");
+        let command = |action: SkillAction, number: u8| {
+            let mut p = make::<CSkillCommand>();
+            p.action = action.raw();
+            p.skill_number = number;
+            p
+        };
+        room.skill_command(1, &command(SkillAction::Learn, 2)); // 회전베기: 힘 15 필요
+        assert_eq!({ last(&mut rx).result }, LoadoutResult::Locked.raw());
+        room.skill_command(1, &command(SkillAction::Learn, 1)); // 강타
+        let l = last(&mut rx);
+        assert_eq!(({ l.result }, { l.slots[0].skill_number }, { l.slots[0].rank }, { l.skill_points_left }), (LoadoutResult::Ok.raw(), 1, 1, 0));
+        let mut stat = make::<CStatCommand>();
+        stat.stat = 0;
+        stat.amount = 1;
+        room.stat_command(1, &stat);
+        assert_eq!({ last(&mut rx).result }, LoadoutResult::NoPoints.raw());
+        room.award_xp(1, 20, ProgressReason::Monster); // 2레벨: 스킬 +1, 스탯 +3
+        assert_eq!({ last(&mut rx).skill_points_left }, 1, "loadout_on_level_up");
+        stat.amount = 3;
+        room.stat_command(1, &stat);
+        assert_eq!({ last(&mut rx).stats }, [8, 5, 5, 5]);
+        // 전투 중에는 지울 수 없다
+        room.mark_combat(1, server_time_ms());
+        room.skill_command(1, &command(SkillAction::Remove, 1));
+        assert_eq!({ last(&mut rx).result }, LoadoutResult::InCombat.raw());
+        room.members[0].last_combat_ms = None;
+        room.skill_command(1, &command(SkillAction::Remove, 1));
+        let l = last(&mut rx);
+        assert_eq!(({ l.result }, { l.slots[0].skill_number }, { l.skill_points_left }), (LoadoutResult::Ok.raw(), 0, 2));
+    }
+
     #[test]
     fn waits_for_two_teams_then_counts_down_and_starts_at_bases() {
         let mut room = match_room();
@@ -1527,10 +1828,10 @@ mod tests {
         assert_eq!(({ p.x }, { p.y }), ({ team_spawn_position(1, 0).x }, { team_spawn_position(1, 0).y }));
         assert_eq!((member(&room, 2).team_slot, member(&room, 3).team), (1, 3));
         let state = room.match_state(t0 + 1);
-        assert_eq!((state.phase, state.round, state.teams_alive, { state.zone_radius_to }), (MatchPhase::Round.raw(), 1, 2, 3700.0));
+        assert_eq!((state.phase, state.round, state.teams_alive, { state.zone_radius_to }), (MatchPhase::Round.raw(), 1, 2, 7100.0));
         // 1라운드 끝 → 축소
         let state = room.match_state(t0 + 1100);
-        assert_eq!((state.phase, state.round, { state.zone_radius_from }, { state.zone_radius_to }), (MatchPhase::Shrink.raw(), 1, 3700.0, 2400.0));
+        assert_eq!((state.phase, state.round, { state.zone_radius_from }, { state.zone_radius_to }), (MatchPhase::Shrink.raw(), 1, 7100.0, 4600.0));
     }
 
     #[test]
@@ -1675,8 +1976,8 @@ mod tests {
         join(&mut room, 1, 1);
         join(&mut room, 2, 2);
         let t0 = start(&mut room, 0);
-        // 1라운드: 반지름 3700 밖(맵 모서리 너머)에 세우면 초당 1%
-        place(&mut room, 1, 3000.0, 2300.0);
+        // 1라운드: 반지름 7100 밖(필드 모서리 너머)에 세우면 초당 1%
+        place(&mut room, 1, 6000.0, 5000.0);
         room.next_zone_damage_ms = 0;
         room.update_match(t0 + 100);
         assert_eq!((member(&room, 1).hp, member(&room, 2).hp), (MAX_HP - 1.0, MAX_HP));

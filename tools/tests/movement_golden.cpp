@@ -2,7 +2,7 @@
 //
 // ascension_movement_golden <data/CombatLab.txt> <출력 파일>
 //
-// 이 프로그램은 봇과 같은 CMake 설정으로 빌드한다. 기록은 rust/crates/movement/tests/golden/movement_v6.txt에
+// 이 프로그램은 봇과 같은 CMake 설정으로 빌드한다. 기록은 rust/crates/movement/tests/golden/movement_v7.txt에
 // 저장해 두고, Rust 시험(tests/golden.rs)이 같은 입력을 돌려 같은 줄이 나오는지 본다.
 // 입력 만드는 방법을 바꾸면 tests/golden.rs도 똑같이 바꾼다. 이동 코드를 일부러 고쳤다면 기록을 다시 만든다.
 #include "AscensionMovement.h"

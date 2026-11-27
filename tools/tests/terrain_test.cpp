@@ -50,7 +50,7 @@ int main(int argc, char** argv)
     const CollisionMap& map = *loaded;
     constexpr float r = RoomLayout::kTerrainRadius, sweep = RoomLayout::kTerrainSweepRadius;
 
-    Check(map.Obstacles().size() == 45, "obstacle_count_45");
+    Check(map.Obstacles().size() == 112, "obstacle_count_112");
 
     // 폐허 0: 중심(-1550,-850), 기둥 A(-1710,-850) 반지름 55, 받침 ±75 높이 40, 상인방 z 265~335
     Check(map.Blocked({-1710.f, -850.f, 92.f}, r), "column_center_blocked");
@@ -68,9 +68,9 @@ int main(int argc, char** argv)
     Check(map.Blocked({-2200.f + 95.f + 20.f, -1300.f, 92.f}, r), "cover_rock_radius95_blocked");
     Check(!map.Blocked({-2200.f + 95.f + 30.f, -1300.f, 92.f}, r), "cover_rock_outside_free");
 
-    // 보이지 않는 경계벽(x 2800~2820)
-    Check(map.Blocked({2790.f, 0.f, 92.f}, r), "east_limit_blocked");
-    Check(!map.Blocked({2760.f, 0.f, 92.f}, r), "near_east_limit_free");
+    // 보이지 않는 경계벽(x 5000~5040)
+    Check(map.Blocked({4990.f, 0.f, 92.f}, r), "east_limit_blocked");
+    Check(!map.Blocked({4960.f, 0.f, 92.f}, r), "near_east_limit_free");
 
     // 높이: 상인방 높이로 떠 있는 캡슐은 막힌다(높이 범위 검사)
     Check(map.Blocked({-1550.f, -850.f, 300.f}, r), "lintel_height_blocked");

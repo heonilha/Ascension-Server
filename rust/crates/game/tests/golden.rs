@@ -44,7 +44,7 @@ impl Random {
 fn rust_port_matches_cpp_golden() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let map = Arc::new(CollisionMap::load(&root.join("../../../data/CombatLab.txt")).expect("map loads"));
-    let golden = std::fs::read_to_string(root.join("tests/golden/game_v6.txt")).expect("golden file");
+    let golden = std::fs::read_to_string(root.join("tests/golden/game_v7.txt")).expect("golden file");
 
     let mut actual = String::new();
     writeln!(actual, "# game golden: protocol v{}, {} obstacles", asc_protocol::VERSION, map.obstacle_count()).unwrap();
@@ -110,8 +110,8 @@ fn rust_port_matches_cpp_golden() {
         for tick in 0..1200i32 {
             now += 50;
             let players = [
-                MonsterPlayer { id: 1, x: (-750 + (tick % 400) * 3) as f32, y: 0.0, alive: true },
-                MonsterPlayer { id: 2, x: 600.0, y: (400 - (tick % 300) * 2) as f32, alive: !(600..800).contains(&tick) },
+                MonsterPlayer { id: 1, x: (-750 + (tick % 400) * 3) as f32, y: 0.0, alive: true, zone: 0 },
+                MonsterPlayer { id: 2, x: 600.0, y: (400 - (tick % 300) * 2) as f32, alive: !(600..800).contains(&tick), zone: 0 },
             ];
             events.clear();
             if field.monsters().len() < 6 {

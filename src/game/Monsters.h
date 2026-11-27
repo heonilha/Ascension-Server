@@ -151,7 +151,11 @@ namespace asc::game
         Monster& SpawnAt(std::uint8_t kind, float x, float y, std::uint32_t nowMs);
         void SetSpawning(bool enabled) { spawning_ = enabled; }
 
-        static constexpr float kArenaHalfWidth = 2800.f, kArenaHalfDepth = 2400.f;
+        // 필드(100m × 100m): 증원 위치 범위. 지형이 있으면 이동·검기는 필드 + 균열 전투장 전체(kWorldHalf*)를 쓴다(필드 경계는 벽이 막는다).
+        static constexpr float kArenaHalfWidth = 5000.f, kArenaHalfDepth = 5000.f;
+        static constexpr float kWorldHalfWidth = 5000.f, kWorldHalfDepth = 7600.f;
+        float HalfWidth() const { return map_ ? kWorldHalfWidth : kArenaHalfWidth; }
+        float HalfDepth() const { return map_ ? kWorldHalfDepth : kArenaHalfDepth; }
 
     private:
         struct Wave

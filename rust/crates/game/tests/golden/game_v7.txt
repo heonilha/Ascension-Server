@@ -1,0 +1,28 @@
+# game golden: protocol v7, 112 obstacles
+collision grid blocked 124 high 86 solid 206 pushed 206 hash 55b51420
+collision pairs sweep 884 line 758 hash ecfdd6e5
+monsters tick 50 count 11 killed 1 waves 2 hash 1362ab5e
+monsters tick 100 count 10 killed 2 waves 1 hash 10afd99a
+monsters tick 150 count 7 killed 5 waves 1 hash 15ccbed4
+monsters tick 200 count 6 killed 6 waves 0 hash 6582bfd3
+monsters tick 250 count 6 killed 8 waves 2 hash d2023a8b
+monsters tick 300 count 6 killed 8 waves 2 hash 71bc4de8
+monsters tick 350 count 6 killed 9 waves 0 hash 86326b19
+monsters tick 400 count 6 killed 11 waves 2 hash 1cfa581d
+monsters tick 450 count 6 killed 11 waves 2 hash 9ee71cff
+monsters tick 500 count 6 killed 16 waves 3 hash 847d7b31
+monsters tick 550 count 6 killed 18 waves 2 hash 552fd23f
+monsters tick 600 count 6 killed 19 waves 3 hash 65d1d310
+monsters tick 650 count 6 killed 21 waves 0 hash 29ac18f1
+monsters tick 700 count 6 killed 23 waves 1 hash 70c7f6cc
+monsters tick 750 count 6 killed 24 waves 2 hash adf2a72d
+monsters tick 800 count 6 killed 26 waves 1 hash 660ee709
+monsters tick 850 count 6 killed 28 waves 2 hash a264d152
+monsters tick 900 count 6 killed 29 waves 0 hash 1547658e
+monsters tick 950 count 6 killed 31 waves 2 hash 5a08d2bc
+monsters tick 1000 count 6 killed 33 waves 1 hash 5e4b426a
+monsters tick 1050 count 6 killed 34 waves 2 hash f3eda21f
+monsters tick 1100 count 6 killed 35 waves 0 hash 3f60f32c
+monsters tick 1150 count 6 killed 36 waves 1 hash 1bd6b6dc
+monsters tick 1200 count 6 killed 36 waves 1 hash 07f77279
+monsters total spawned 42 killed 36 tells 270 touches 42 hits 106 wave_ends 71

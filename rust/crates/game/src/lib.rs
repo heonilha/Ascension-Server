@@ -5,6 +5,8 @@
 
 pub mod collision;
 pub mod combat_rules;
+pub mod field;
+pub mod loadout;
 pub mod match_rules;
 pub mod monsters;
 pub mod progression;

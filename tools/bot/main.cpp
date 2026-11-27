@@ -535,7 +535,8 @@ namespace
                     if (entry.playerId != playerId_)
                     {
                         stats_.movedOthers.insert(entry.playerId);
-                        target_ = entry.position;
+                        // 풀숲에 숨은 사람은 위치가 오지 않는다(마지막으로 본 자리를 계속 노린다)
+                        if (entry.state != MoveState::Hidden) target_ = entry.position;
                     }
                 }
                 break;
@@ -638,7 +639,7 @@ namespace
                 stats_.monstersSeen.insert(entry.id);
                 if (entry.kind < 3) stats_.monsterKinds[entry.kind] = true;
                 const float x = entry.x, y = entry.y;
-                stats_.monsterOutside |= std::abs(x) > 2800.f || std::abs(y) > 2400.f;
+                stats_.monsterOutside |= std::abs(x) > 5000.f || std::abs(y) > 7600.f;
                 for (const move::Obstacle& o : options_.world->obstacles)
                 {
                     if (move::Solid(o)) stats_.monsterMinClearance = std::min(stats_.monsterMinClearance, move::SignedDistance({x, y}, o.polygon));

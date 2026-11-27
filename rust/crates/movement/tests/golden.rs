@@ -30,7 +30,7 @@ fn ffi_matches_cpp_golden() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let map = std::fs::read_to_string(root.join("../../../data/CombatLab.txt")).expect("data/CombatLab.txt");
     let world = World::parse(&map).expect("map parses");
-    let golden = std::fs::read_to_string(root.join("tests/golden/movement_v6.txt")).expect("golden file");
+    let golden = std::fs::read_to_string(root.join("tests/golden/movement_v7.txt")).expect("golden file");
 
     let mut actual = String::new();
     writeln!(actual, "# movement golden: protocol v{}, {} obstacles", asc_protocol::VERSION, world.obstacle_count()).unwrap();

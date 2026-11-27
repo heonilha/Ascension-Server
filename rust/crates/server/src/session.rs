@@ -193,6 +193,14 @@ impl Session {
                 }
                 self.to_room(RoomCommand::Respawn { player_id }).await;
             }
+            PacketId::CSkillCommand => {
+                let Some(packet) = read_exact::<CSkillCommand>(bytes) else { return false };
+                self.to_room(RoomCommand::Skill { player_id, packet }).await;
+            }
+            PacketId::CStatCommand => {
+                let Some(packet) = read_exact::<CStatCommand>(bytes) else { return false };
+                self.to_room(RoomCommand::Stat { player_id, packet }).await;
+            }
             PacketId::CAttack => {
                 let Some(packet) = read_exact::<CAttack>(bytes) else { return false };
                 self.to_room(RoomCommand::Attack { player_id, packet }).await;

@@ -7,9 +7,77 @@
 
 use asc_protocol::MatchPhase;
 
-/// 라운드 n(1~4)이 시작할 때의 자기장 반지름(cm). 1라운드는 맵 전체(2800 × 2400 직사각형의 대각선 절반 ≈ 3690)를 덮는다.
-/// 라운드 n이 끝나면 축소 단계 동안 다음 값으로 줄고, 4라운드는 진행 내내 0까지 준다.
-pub const ZONE_RADIUS: [f32; 4] = [3700.0, 2400.0, 1500.0, 800.0];
+/// 라운드 n(1~4)이 시작할 때의 자기장 반지름(cm). 1라운드는 필드 전체(100m × 100m의 대각선 절반 ≈ 7071)를 덮는다.
+/// 2라운드는 팀 기지(중심에서 40m)까지 덮는다. 라운드 n이 끝나면 축소 단계 동안 다음 값으로 줄고, 4라운드는 진행 내내 0까지 준다.
+pub const ZONE_RADIUS: [f32; 4] = [7100.0, 4600.0, 2800.0, 1500.0];
+
+/// 균열 보상(임시): 팀원 모두 경험치와 스탯 포인트 +3(기획안). 경험치는 1라운드 끝 12레벨 기준으로 한두 레벨 분량.
+pub const RIFT_REWARD_XP: u32 = 400;
+pub const RIFT_REWARD_STATS: u16 = 3;
+/// 균열 전투장 자기장 피해(초당 최대 체력 %): 축소 앞부분 5%, 마지막 30초 15%
+pub const RIFT_ZONE_DAMAGE: [f32; 2] = [5.0, 15.0];
+
+/// 균열 시간표(기획안 "균열"). 모두 1라운드 시작이 아니라 각 단계 기준이다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RiftSchedule {
+    /// 2라운드 시작부터 균열이 열릴 때까지(2분)
+    pub open_after_round2_ms: u32,
+    /// 한 팀이 들어간 뒤 상대를 기다리는 시간(1분). 지나면 입구가 닫히고 보스전
+    pub wait_ms: u32,
+    /// 대결 시간(3분)
+    pub pvp_ms: u32,
+    /// 대결 시작부터 자기장이 줄기 시작할 때까지(1분 30초)
+    pub pvp_shrink_ms: u32,
+    /// 대결 시작부터 자기장 피해가 커질 때까지(2분 30초)
+    pub pvp_late_ms: u32,
+    /// 대결이 시작된 뒤에도 같은 팀원이 자기 입구로 따라 들어올 수 있는 시간
+    pub join_grace_ms: u32,
+    /// 보스전 제한 시간(4분)
+    pub boss_ms: u32,
+    /// 균열 안에서 죽으면 밖에서 부활할 때까지(20초)
+    pub respawn_ms: u32,
+    /// 결과 표시
+    pub result_ms: u32,
+    /// 입구에 이만큼 서 있으면 들어간다
+    pub enter_hold_ms: u32,
+}
+
+impl Default for RiftSchedule {
+    fn default() -> Self {
+        RiftSchedule {
+            open_after_round2_ms: 120_000,
+            wait_ms: 60_000,
+            pvp_ms: 180_000,
+            pvp_shrink_ms: 90_000,
+            pvp_late_ms: 150_000,
+            join_grace_ms: 10_000,
+            boss_ms: 240_000,
+            respawn_ms: 20_000,
+            result_ms: 5_000,
+            enter_hold_ms: 1_000,
+        }
+    }
+}
+
+impl RiftSchedule {
+    /// 모든 시간에 `scale`을 곱한다(입구에 서 있는 시간과 결과 표시는 그대로). 각 시간은 최소 200ms.
+    pub fn scaled(scale: f32) -> RiftSchedule {
+        let base = RiftSchedule::default();
+        let s = |ms: u32| ((ms as f64 * scale.max(0.0) as f64).round() as u32).max(200);
+        RiftSchedule {
+            open_after_round2_ms: s(base.open_after_round2_ms),
+            wait_ms: s(base.wait_ms),
+            pvp_ms: s(base.pvp_ms),
+            pvp_shrink_ms: s(base.pvp_shrink_ms),
+            pvp_late_ms: s(base.pvp_late_ms),
+            join_grace_ms: s(base.join_grace_ms),
+            boss_ms: s(base.boss_ms),
+            respawn_ms: s(base.respawn_ms),
+            result_ms: base.result_ms,
+            enter_hold_ms: base.enter_hold_ms,
+        }
+    }
+}
 /// 자기장 중심. 4라운드에 이 한 점으로 모인다(데모 맵 중앙).
 pub const ZONE_CENTER: (f32, f32) = (0.0, 0.0);
 /// 라운드 n의 자기장 밖 피해: 초당 최대 체력 대비 퍼센트. 라운드 n 뒤 축소 단계도 같은 값을 쓴다.
@@ -31,6 +99,7 @@ pub struct MatchSchedule {
     pub pregame_respawn_ms: u32,
     /// 이 수 이상의 팀이 들어오면 카운트다운을 시작한다
     pub start_teams: u8,
+    pub rift: RiftSchedule,
 }
 
 impl Default for MatchSchedule {
@@ -44,6 +113,7 @@ impl Default for MatchSchedule {
             respawn_ms: [10_000, 20_000, 30_000],
             pregame_respawn_ms: 3_000,
             start_teams: 2,
+            rift: RiftSchedule::default(),
         }
     }
 }
@@ -61,12 +131,18 @@ impl MatchSchedule {
             respawn_ms: base.respawn_ms.map(s),
             pregame_respawn_ms: s(base.pregame_respawn_ms),
             start_teams: base.start_teams,
+            rift: RiftSchedule::scaled(scale),
         }
     }
 
     /// 1라운드 시작부터 4라운드 끝까지
     pub fn total_ms(&self) -> u32 {
         self.round_ms.iter().sum::<u32>() + 3 * self.shrink_ms
+    }
+
+    /// 1라운드 시작부터 균열이 열릴 때까지(2라운드 시작 + 2분)
+    pub fn rift_open_offset_ms(&self) -> u32 {
+        self.round_ms[0] + self.shrink_ms + self.rift.open_after_round2_ms
     }
 }
 
@@ -168,11 +244,11 @@ mod tests {
         let p = running_phase(&s, 0);
         assert_eq!(
             (p.phase, p.round, p.radius_from, p.radius_to, p.damage_percent, p.respawn_wait_ms),
-            (MatchPhase::Round, 1, 3700.0, 3700.0, 1.0, Some(10_000))
+            (MatchPhase::Round, 1, 7100.0, 7100.0, 1.0, Some(10_000))
         );
         let p = running_phase(&s, 15 * min);
-        assert_eq!((p.phase, p.round, p.radius_from, p.radius_to), (MatchPhase::Shrink, 1, 3700.0, 2400.0));
-        assert_eq!(p.radius_at(15 * min + 30_000), 3050.0); // 축소 절반
+        assert_eq!((p.phase, p.round, p.radius_from, p.radius_to), (MatchPhase::Shrink, 1, 7100.0, 4600.0));
+        assert_eq!(p.radius_at(15 * min + 30_000), 5850.0); // 축소 절반
         let p = running_phase(&s, 16 * min);
         assert_eq!((p.phase, p.round, p.damage_percent, p.respawn_wait_ms), (MatchPhase::Round, 2, 2.0, Some(20_000)));
         let p = running_phase(&s, 27 * min + 1);
@@ -180,8 +256,8 @@ mod tests {
         let p = running_phase(&s, 32 * min + 1); // 3라운드 뒤 축소: 아직 부활 가능
         assert_eq!((p.phase, p.round, p.respawn_wait_ms), (MatchPhase::Shrink, 3, Some(30_000)));
         let p = running_phase(&s, 33 * min);
-        assert_eq!((p.phase, p.round, p.radius_from, p.radius_to, p.damage_percent, p.respawn_wait_ms), (MatchPhase::Round, 4, 800.0, 0.0, 8.0, None));
-        assert_eq!(p.radius_at(33 * min + 90_000), 400.0);
+        assert_eq!((p.phase, p.round, p.radius_from, p.radius_to, p.damage_percent, p.respawn_wait_ms), (MatchPhase::Round, 4, 1500.0, 0.0, 8.0, None));
+        assert_eq!(p.radius_at(33 * min + 90_000), 750.0);
         // 4라운드가 끝난 뒤에도 4라운드, 반지름 0
         let p = running_phase(&s, 50 * min);
         assert_eq!((p.round, p.radius_at(50 * min)), (4, 0.0));
@@ -193,6 +269,15 @@ mod tests {
         assert_eq!(s.round_ms, [9_000, 6_000, 3_000, 1_800]);
         assert_eq!((s.shrink_ms, s.respawn_ms), (600, [200, 200, 300]));
         assert_eq!(s.total_ms(), 21_600);
+        assert_eq!((s.rift.open_after_round2_ms, s.rift.pvp_ms, s.rift.enter_hold_ms), (1_200, 1_800, 1_000));
+    }
+
+    #[test]
+    fn rift_opens_two_minutes_into_round_2() {
+        let s = MatchSchedule::default();
+        assert_eq!(s.rift_open_offset_ms(), 18 * 60_000);
+        let p = running_phase(&s, s.rift_open_offset_ms());
+        assert_eq!((p.phase, p.round), (MatchPhase::Round, 2));
     }
 
     #[test]

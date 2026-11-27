@@ -3,6 +3,9 @@
 //! 1인 데모(클라이언트 CombatLab.cpp의 ACLEnemy·ACLBladeWave·TickSurvival)의 규칙을 서버로 옮긴 것이다.
 //! - 종류: 0 망령 검병(부채꼴 베기), 1 폭주 망령(직선 돌진), 2 망령 지휘관(2연속 베기, 경직에 끊기지 않음)
 //! - 추적: 가장 가까운 살아 있는 플레이어. 정면이 막히면 ±45·±90·±135도로 돌아간다.
+//! - 캠프 몬스터(매치 필드): 공격받기 전에는 제자리에 서 있다. 맞으면 그 캠프 전체가 공격한 사람을 쫓고,
+//!   캠프에서 너무 멀어지거나 대상을 놓치면 제자리로 돌아가 체력을 채운다(돌아가는 동안은 맞지 않는다).
+//!   다 잡힌 캠프는 잠시 뒤 다시 채워진다.
 //! - 피격: 경직 중 넉백(지형에 막히면 멈춤), 0.35초 동안은 다시 경직되지 않는다. 지휘관 외에는 예고가 끊긴다.
 //! - 증원: 주기적 증원 + 목표 수 보충 + 60초마다 지휘관, 층당 최대 48마리.
 //! - 검기: 가까운 순서로 관통하고 같은 몬스터를 두 번 맞히지 않는다. 벽에 막히고, 기둥 뒤 몬스터는 맞지 않는다.
@@ -15,8 +18,9 @@
 //! 비트 단위로 같은지 `tests/golden.rs`가 비교한다(증원은 난수 구현이 달라 규칙만 시험한다).
 
 use crate::collision::CollisionMap;
+use crate::field::CampSpot;
 use crate::rng::Rng;
-use crate::room_layout::{ARENA_HALF_DEPTH, ARENA_HALF_WIDTH};
+use crate::room_layout::{ARENA_HALF_DEPTH, ARENA_HALF_WIDTH, WORLD_HALF_DEPTH, WORLD_HALF_WIDTH};
 use asc_movement::{Vec2, GROUND_Z};
 use asc_protocol::{MonsterState, Vec3, MAX_MONSTERS};
 use std::sync::Arc;
@@ -69,6 +73,15 @@ pub mod tuning {
     /// 검기 반지름에 더하는 몬스터 몸 크기
     pub const WAVE_HIT_PADDING: f32 = 32.0;
     pub const WAVE_WALL_RADIUS: f32 = 15.0;
+    // 캠프(임시 수치)
+    /// 다 잡힌 캠프가 다시 채워질 때까지
+    pub const CAMP_RESPAWN_MS: u32 = 30_000;
+    /// 캠프 중심에서 이보다 멀어지면 돌아간다
+    pub const CAMP_LEASH: f32 = 1400.0;
+    /// 쫓던 대상이 이보다 멀어지면 놓친다
+    pub const CAMP_LOSE_DISTANCE: f32 = 1600.0;
+    /// 제자리로 돌아가는 속도
+    pub const RETURN_SPEED: f32 = 360.0;
 }
 use tuning as t;
 
@@ -104,6 +117,19 @@ pub struct Monster {
     pub knock_remaining: f32,
     /// 이번 돌진에 이미 맞은 플레이어
     pub dash_hits: Vec<u32>,
+    pub max_hp: f32,
+    /// 공격 피해 배율(균열 보스 등). 1 = 기본
+    pub power: f32,
+    /// 0 필드, 1 균열 전투장. 같은 구역의 플레이어만 노린다
+    pub zone: u8,
+    /// 캠프 몬스터의 제자리. `None`이면 생존 모드 몬스터(항상 가장 가까운 플레이어를 쫓는다)
+    pub home: Option<(f32, f32)>,
+    /// 속한 캠프 번호
+    pub camp: Option<usize>,
+    /// 캠프 몬스터가 쫓는 플레이어
+    pub aggro: Option<u32>,
+    /// 제자리로 돌아가는 중(맞지 않는다)
+    pub returning: bool,
 }
 
 impl Monster {
@@ -123,6 +149,8 @@ pub struct MonsterPlayer {
     pub x: f32,
     pub y: f32,
     pub alive: bool,
+    /// 0 필드, 1 균열 전투장
+    pub zone: u8,
 }
 
 /// 공격 예고 시작(`hit_ms`에 베기 명중 또는 돌진 출발) 또는 취소(`cancel`).
@@ -136,11 +164,13 @@ pub struct Tell {
     pub yaw: f32,
     pub start_ms: u32,
     pub hit_ms: u32,
+    /// 피해 배율(`Monster::power`)
+    pub power: f32,
 }
 
 impl Tell {
     fn canceled(monster: &Monster) -> Tell {
-        Tell { monster_id: monster.id, kind: monster.kind, cancel: true, x: 0.0, y: 0.0, yaw: 0.0, start_ms: 0, hit_ms: 0 }
+        Tell { monster_id: monster.id, kind: monster.kind, cancel: true, x: 0.0, y: 0.0, yaw: 0.0, start_ms: 0, hit_ms: 0, power: monster.power }
     }
 }
 
@@ -151,6 +181,7 @@ pub struct DashTouch {
     pub player_id: u32,
     pub x: f32,
     pub y: f32,
+    pub power: f32,
 }
 
 /// 몬스터가 피해를 입었다(`hp_after` 0 = 사망).
@@ -211,9 +242,19 @@ struct Wave {
 struct Terrain<'a>(Option<&'a CollisionMap>);
 
 impl Terrain<'_> {
+    /// 이동 범위(반폭, 반높이). 지형이 있으면 필드 + 균열 전투장 전체(필드 경계는 벽이 막는다), 없으면 필드만.
+    fn half(self) -> (f32, f32) {
+        if self.0.is_some() {
+            (WORLD_HALF_WIDTH, WORLD_HALF_DEPTH)
+        } else {
+            (ARENA_HALF_WIDTH, ARENA_HALF_DEPTH)
+        }
+    }
+
     /// 단단한 장애물 또는 맵 밖
     fn overlaps(self, x: f32, y: f32, radius: f32) -> bool {
-        if x.abs() > ARENA_HALF_WIDTH - radius || y.abs() > ARENA_HALF_DEPTH - radius {
+        let (half_width, half_depth) = self.half();
+        if x.abs() > half_width - radius || y.abs() > half_depth - radius {
             return true;
         }
         self.0.is_some_and(|map| map.solid_overlap(Vec2 { x, y }, radius))
@@ -236,8 +277,9 @@ impl Terrain<'_> {
                 *y = p.y;
             }
         }
-        *x = x.clamp(-ARENA_HALF_WIDTH + radius, ARENA_HALF_WIDTH - radius);
-        *y = y.clamp(-ARENA_HALF_DEPTH + radius, ARENA_HALF_DEPTH - radius);
+        let (half_width, half_depth) = self.half();
+        *x = x.clamp(-half_width + radius, half_width - radius);
+        *y = y.clamp(-half_depth + radius, half_depth - radius);
     }
 
     fn line_of_sight(self, x0: f32, y0: f32, x1: f32, y1: f32) -> bool {
@@ -245,8 +287,15 @@ impl Terrain<'_> {
     }
 }
 
+struct Camp {
+    spot: CampSpot,
+    /// 다 잡혔다: 이 시각에 다시 채운다
+    respawn_at_ms: Option<u32>,
+}
+
 pub struct MonsterField {
     map: Option<Arc<CollisionMap>>,
+    camps: Vec<Camp>,
     rng: Rng,
     monsters: Vec<Monster>,
     waves: Vec<Wave>,
@@ -266,6 +315,7 @@ impl MonsterField {
     pub fn new(map: Option<Arc<CollisionMap>>, seed: u32, now_ms: u32) -> MonsterField {
         MonsterField {
             map,
+            camps: Vec::new(),
             rng: Rng::new(seed),
             monsters: Vec::new(),
             waves: Vec::new(),
@@ -287,6 +337,10 @@ impl MonsterField {
 
     pub fn monster(&self, id: u16) -> Option<&Monster> {
         self.monsters.iter().find(|m| m.id == id)
+    }
+
+    pub fn monster_mut(&mut self, id: u16) -> Option<&mut Monster> {
+        self.monsters.iter_mut().find(|m| m.id == id)
     }
 
     pub fn wave_count(&self) -> usize {
@@ -337,14 +391,85 @@ impl MonsterField {
             knock_y: 0.0,
             knock_remaining: 0.0,
             dash_hits: Vec::new(),
+            max_hp: t::MAX_HP[kind as usize],
+            power: 1.0,
+            zone: 0,
+            home: None,
+            camp: None,
+            aggro: None,
+            returning: false,
         });
         self.monsters.last_mut().unwrap()
+    }
+
+    /// 몬스터 하나를 없앤다(균열 보스 정리 등). 예고 중이면 취소를 알린다.
+    pub fn remove(&mut self, id: u16, events: &mut MonsterEvents) {
+        if let Some(index) = self.monsters.iter().position(|m| m.id == id) {
+            if self.monsters[index].phase == MonsterState::Tell {
+                events.tells.push(Tell::canceled(&self.monsters[index]));
+            }
+            self.monsters.remove(index);
+        }
+    }
+
+    /// 캠프를 등록하고 바로 채운다(매치 필드). 캠프 몬스터는 공격받기 전에는 움직이지 않는다.
+    pub fn set_camps(&mut self, spots: &[CampSpot], now_ms: u32) {
+        self.monsters.retain(|m| m.camp.is_none());
+        self.camps = spots.iter().map(|spot| Camp { spot: spot.clone(), respawn_at_ms: None }).collect();
+        for index in 0..self.camps.len() {
+            self.fill_camp(index, now_ms);
+        }
+    }
+
+    fn fill_camp(&mut self, index: usize, now_ms: u32) {
+        let spot = self.camps[index].spot.clone();
+        let count = spot.kinds.len().max(1);
+        for (k, &kind) in spot.kinds.iter().enumerate() {
+            if self.monsters.len() >= MAX_MONSTERS as usize {
+                return;
+            }
+            // 캠프 중심 둘레에 고르게. 막힌 자리면 조금씩 돌려 본다.
+            let mut place = (spot.x, spot.y);
+            for attempt in 0..12 {
+                let angle = (k as f32 + attempt as f32 * 0.37) * 2.0 * PI / count as f32;
+                let ring = spot.radius * if kind == 2 { 0.15 } else { 0.55 };
+                let (x, y) = (spot.x + ring * angle.cos(), spot.y + ring * angle.sin());
+                if !self.terrain().overlaps(x, y, t::SPAWN_CLEAR_RADIUS) {
+                    place = (x, y);
+                    break;
+                }
+            }
+            let monster = self.spawn_at(kind, place.0, place.1, now_ms);
+            monster.home = Some(place);
+            monster.camp = Some(index);
+            monster.phase = MonsterState::Idle;
+            monster.yaw = (place.1 - spot.y).atan2(place.0 - spot.x) * DEGREES;
+        }
+    }
+
+    fn update_camps(&mut self, now_ms: u32) {
+        for index in 0..self.camps.len() {
+            if self.monsters.iter().any(|m| m.camp == Some(index)) {
+                continue;
+            }
+            match self.camps[index].respawn_at_ms {
+                None => self.camps[index].respawn_at_ms = Some(now_ms.wrapping_add(t::CAMP_RESPAWN_MS)),
+                Some(at) if now_ms >= at => {
+                    self.camps[index].respawn_at_ms = None;
+                    self.fill_camp(index, now_ms);
+                }
+                Some(_) => {}
+            }
+        }
     }
 
     /// 한 틱 진행: 증원 → 몬스터 AI·이동 → 검기. `dt`는 초.
     pub fn update(&mut self, now_ms: u32, dt: f32, players: &[MonsterPlayer], events: &mut MonsterEvents) {
         if self.spawning {
             self.update_spawning(now_ms, players);
+        }
+        if !self.camps.is_empty() {
+            self.update_camps(now_ms);
         }
         let terrain = Terrain(self.map.as_deref());
         for monster in &mut self.monsters {
@@ -478,6 +603,20 @@ impl MonsterField {
         let Some(index) = self.monsters.iter().position(|m| m.id == monster_id) else {
             return false;
         };
+        if self.monsters[index].returning {
+            return true; // 제자리로 돌아가는 중에는 맞지 않는다
+        }
+        // 캠프 몬스터: 맞으면 그 캠프 전체가 공격한 사람을 쫓는다
+        if let (Some(camp), true) = (self.monsters[index].camp, attacker_id != 0) {
+            for other in &mut self.monsters {
+                if other.camp == Some(camp) && !other.returning && other.aggro.is_none() {
+                    other.aggro = Some(attacker_id);
+                    if other.phase == MonsterState::Idle {
+                        other.phase = MonsterState::Chase;
+                    }
+                }
+            }
+        }
         let monster = &mut self.monsters[index];
         monster.hp = (monster.hp - damage).max(0.0);
         events.hits.push(Hit { monster_id: monster.id, kind: monster.kind, attacker_id, damage, hp_after: monster.hp, x: monster.x, y: monster.y });
@@ -526,6 +665,7 @@ impl MonsterField {
                     yaw: monster.yaw,
                     start_ms: now_ms,
                     hit_ms: monster.deadline_ms,
+                    power: monster.power,
                 });
             }
         }
@@ -573,7 +713,8 @@ impl MonsterField {
             let mut s = 10.0f32;
             while s <= length {
                 let (x, y) = (wave.x + wave.dir_x * s, wave.y + wave.dir_y * s);
-                let outside = x.abs() > ARENA_HALF_WIDTH || y.abs() > ARENA_HALF_DEPTH;
+                let (half_width, half_depth) = terrain.half();
+                let outside = x.abs() > half_width || y.abs() > half_depth;
                 if outside || terrain.0.is_some_and(|map| map.blocked(Vec3 { x, y, z: GROUND_Z }, t::WAVE_WALL_RADIUS)) {
                     blocked = true;
                     length = s - 10.0;
@@ -661,10 +802,15 @@ fn begin_tell(monster: &mut Monster, target: &MonsterPlayer, start_ms: u32, even
         yaw: monster.yaw,
         start_ms,
         hit_ms: monster.deadline_ms,
+        power: monster.power,
     });
 }
 
 fn chase(terrain: Terrain, monster: &mut Monster, to_x: f32, to_y: f32, dt: f32) {
+    walk(terrain, monster, to_x, to_y, t::CHASE_SPEED, dt);
+}
+
+fn walk(terrain: Terrain, monster: &mut Monster, to_x: f32, to_y: f32, speed: f32, dt: f32) {
     let length = to_x.hypot(to_y);
     if length < 1e-3 {
         return;
@@ -677,8 +823,14 @@ fn chase(terrain: Terrain, monster: &mut Monster, to_x: f32, to_y: f32, dt: f32)
         if terrain.sweep_blocked(monster.x, monster.y, monster.x + dir_x * t::STEER_PROBE, monster.y + dir_y * t::STEER_PROBE, t::STEER_RADIUS) {
             continue;
         }
-        monster.x += dir_x * t::CHASE_SPEED * dt;
-        monster.y += dir_y * t::CHASE_SPEED * dt;
+        if speed * dt >= length {
+            // 목적지에 닿는다(제자리로 돌아가기)
+            monster.x += to_x;
+            monster.y += to_y;
+        } else {
+            monster.x += dir_x * speed * dt;
+            monster.y += dir_y * speed * dt;
+        }
         monster.yaw = dir_y.atan2(dir_x) * DEGREES;
         break;
     }
@@ -712,10 +864,51 @@ fn update_monster(terrain: Terrain, monster: &mut Monster, now_ms: u32, dt: f32,
         monster.knock_remaining = 0.0;
     }
 
-    // 가장 가까운 살아 있는 플레이어
+    // 캠프 몬스터: 제자리로 돌아가는 중이거나, 쫓을 대상이 없거나 너무 멀리 왔으면 돌아간다.
+    if let Some((home_x, home_y)) = monster.home {
+        if !monster.returning && monster.phase != MonsterState::Dash {
+            let target = monster.aggro.and_then(|id| players.iter().find(|p| p.id == id && p.alive && p.zone == monster.zone));
+            let lost = match target {
+                Some(p) => distance(p.x, p.y, monster.x, monster.y) > t::CAMP_LOSE_DISTANCE || distance(monster.x, monster.y, home_x, home_y) > t::CAMP_LEASH,
+                None => true,
+            };
+            if lost {
+                if monster.phase == MonsterState::Tell {
+                    events.tells.push(Tell::canceled(monster));
+                }
+                monster.aggro = None;
+                monster.strike = 0;
+                if distance(monster.x, monster.y, home_x, home_y) > 20.0 {
+                    monster.returning = true;
+                    monster.phase = MonsterState::Chase;
+                } else {
+                    monster.phase = MonsterState::Idle;
+                    return;
+                }
+            }
+        }
+        if monster.returning {
+            let (to_x, to_y) = (home_x - monster.x, home_y - monster.y);
+            if to_x.hypot(to_y) <= 20.0 {
+                monster.x = home_x;
+                monster.y = home_y;
+                monster.returning = false;
+                monster.hp = monster.max_hp;
+                monster.phase = MonsterState::Idle;
+            } else {
+                walk(terrain, monster, to_x, to_y, t::RETURN_SPEED, dt);
+            }
+            return;
+        }
+    }
+
+    // 대상: 캠프 몬스터는 공격한 사람, 아니면 같은 구역에서 가장 가까운 살아 있는 플레이어
     let mut target: Option<&MonsterPlayer> = None;
     let mut target_distance = 1e30f32;
     for player in players {
+        if monster.aggro.is_some_and(|id| id != player.id) || player.zone != monster.zone {
+            continue;
+        }
         let d = distance(player.x, player.y, monster.x, monster.y);
         if player.alive && d < target_distance {
             target = Some(player);
@@ -776,14 +969,14 @@ fn update_monster(terrain: Terrain, monster: &mut Monster, now_ms: u32, dt: f32,
                 monster.x = x;
                 monster.y = y;
                 for player in players {
-                    if !player.alive || monster.dash_hits.contains(&player.id) {
+                    if !player.alive || player.zone != monster.zone || monster.dash_hits.contains(&player.id) {
                         continue;
                     }
                     if distance(player.x, player.y, x, y) >= t::DASH_HIT_DISTANCE || !terrain.line_of_sight(x, y, player.x, player.y) {
                         continue;
                     }
                     monster.dash_hits.push(player.id);
-                    events.dash_touches.push(DashTouch { monster_id: monster.id, player_id: player.id, x, y });
+                    events.dash_touches.push(DashTouch { monster_id: monster.id, player_id: player.id, x, y, power: monster.power });
                 }
             }
             if monster.phase == MonsterState::Dash && now_ms >= monster.deadline_ms {

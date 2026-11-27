@@ -3,6 +3,7 @@
 #   .\Scripts\RunServer.ps1 -TimeScale 0.1        # demo: every match time x0.1 (about 3.6 minutes per match)
 #   .\Scripts\RunServer.ps1 -StartTeams 1         # start a match with a single team (solo testing)
 #   .\Scripts\RunServer.ps1 -TimeScale 0.1 -XpScale 10   # short demo where levels still rise at the planned pace
+#   .\Scripts\RunServer.ps1 -TimeScale 0.1 -XpScale 10 -RiftTimeScale 0.5   # ...with a rift long enough to play (90 s duel)
 #   .\Scripts\RunServer.ps1 -NoMonsters           # no server monsters (matches and practice rooms)
 #   .\Scripts\RunServer.ps1 -PracticeSlamMs 1500  # practice rooms get the test slam attack every 1.5 s (dodge testing)
 # Teammates on other PCs connect to <this PC's IPv4>:7777. Allow it once in an admin PowerShell:
@@ -14,6 +15,7 @@ param(
     [double]$TimeScale = 1.0,
     [int]$StartTeams = 2,
     [double]$XpScale = 1.0,
+    [double]$RiftTimeScale = 0,
     [int]$PracticeSlamMs = 0,
     [switch]$NoMonsters,
     [switch]$NoBuild
@@ -28,6 +30,7 @@ $exe = Join-Path $root 'rust\target\release\ascension-server.exe'
 if (-not (Test-Path $exe)) { throw "Server not built: $exe" }
 
 $serverArgs = @('--port', $Port, '--match-time-scale', $TimeScale.ToString([Globalization.CultureInfo]::InvariantCulture), '--match-start-teams', $StartTeams, '--match-xp-scale', $XpScale.ToString([Globalization.CultureInfo]::InvariantCulture))
+if ($RiftTimeScale -gt 0) { $serverArgs += @('--match-rift-time-scale', $RiftTimeScale.ToString([Globalization.CultureInfo]::InvariantCulture)) }
 if ($Threads -gt 0) { $serverArgs += @('--threads', $Threads) }
 if ($PracticeSlamMs -gt 0) { $serverArgs += @('--practice-slam-ms', $PracticeSlamMs) }
 if ($NoMonsters) { $serverArgs += @('--practice-monsters', 0, '--match-monsters', 0) }

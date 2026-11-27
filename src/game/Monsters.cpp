@@ -29,7 +29,7 @@ namespace asc::game
 
     bool MonsterField::Overlaps(float x, float y, float radius) const
     {
-        if (std::abs(x) > kArenaHalfWidth - radius || std::abs(y) > kArenaHalfDepth - radius) return true;
+        if (std::abs(x) > HalfWidth() - radius || std::abs(y) > HalfDepth() - radius) return true;
         return map_ && map_->SolidOverlap({x, y}, radius);
     }
 
@@ -52,8 +52,8 @@ namespace asc::game
             move::Vec2 p{x, y};
             if (map_->PushOutSolid(p, radius)) x = p.x, y = p.y;
         }
-        x = std::clamp(x, -kArenaHalfWidth + radius, kArenaHalfWidth - radius);
-        y = std::clamp(y, -kArenaHalfDepth + radius, kArenaHalfDepth - radius);
+        x = std::clamp(x, -HalfWidth() + radius, HalfWidth() - radius);
+        y = std::clamp(y, -HalfDepth() + radius, HalfDepth() - radius);
     }
 
     bool MonsterField::LineOfSight(float x0, float y0, float x1, float y1) const
@@ -407,7 +407,7 @@ namespace asc::game
             for (float s = 10.f; s <= length; s += 10.f)
             {
                 const float x = wave.x + wave.dirX * s, y = wave.y + wave.dirY * s;
-                const bool outside = std::abs(x) > kArenaHalfWidth || std::abs(y) > kArenaHalfDepth;
+                const bool outside = std::abs(x) > HalfWidth() || std::abs(y) > HalfDepth();
                 if (outside || (map_ && map_->Blocked({x, y, move::kGroundZ}, T::kWaveWallRadius)))
                 {
                     blocked = true;

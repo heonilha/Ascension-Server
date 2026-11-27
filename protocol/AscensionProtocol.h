@@ -15,7 +15,7 @@
 
 namespace asc::proto
 {
-    inline constexpr std::uint16_t kVersion = 6;
+    inline constexpr std::uint16_t kVersion = 7;
     inline constexpr std::uint16_t kMaxPacketSize = 4096;
     inline constexpr std::size_t kNameLength = 32;     // UTF-8, 널 문자 포함
     inline constexpr std::uint8_t kMaxPracticePlayers = 3; // 연습 방 최대 인원
@@ -25,6 +25,10 @@ namespace asc::proto
     inline constexpr std::uint8_t kMaxMonsters = 48;       // 방 하나의 최대 몬스터 수
     inline constexpr std::uint16_t kDefaultPort = 7777;
     inline constexpr std::uint32_t kServerTickMs = 50; // 서버 틱 20Hz. S_MoveBatch.serverTick × 이 값 = 서버 시간
+    inline constexpr std::uint8_t kSkillSlots = 4;         // 배울 수 있는 스킬 수(검·활 합쳐서)
+    inline constexpr std::uint8_t kSkillMaxRank = 3;       // 배우기 1 + 강화 2
+    inline constexpr std::uint8_t kSkillCount = 24;        // 스킬 번호 1~24(아래 SkillNumber)
+    inline constexpr std::uint16_t kStartStat = 5;         // 시작 스탯(힘·민첩·지능·체력 모두)
 
     enum class PacketId : std::uint16_t
     {
@@ -54,6 +58,11 @@ namespace asc::proto
         S_MatchState = 25,
         S_PlayerDied = 26,
         S_PlayerProgress = 27,
+        S_Teleport = 28,
+        S_RiftState = 29,
+        C_SkillCommand = 30,
+        C_StatCommand = 31,
+        S_Loadout = 32,
     };
 
     // 방 종류. 같은 teamCode라도 모드가 다르면 다른 방이다.
@@ -88,6 +97,7 @@ namespace asc::proto
         Heavy = 3,
         Dodge = 4,
         Dead = 5,
+        Hidden = 6, // 서버만 쓴다: 풀숲에 숨어 받는 사람에게 보이지 않는다(위치 값은 의미 없음). 다시 보이면 보통 상태로 온다
     };
 
     enum class LoginResult : std::uint8_t
@@ -124,6 +134,7 @@ namespace asc::proto
         None = 0,    // 입장·초기화 때 현재 값 알림
         Monster = 1, // 몬스터 처치
         Player = 2,  // 플레이어 처치
+        Rift = 3,    // 균열 승리·보스 처치 보상(경험치 + 스탯 포인트)
     };
 
     // 사망 원인
@@ -135,6 +146,46 @@ namespace asc::proto
     };
 
 #pragma pack(push, 1)
+    // 균열(2라운드 시작 2분 뒤 열린다). 기준: 11.26 기획안 "균열"
+    enum class RiftPhase : std::uint8_t
+    {
+        Closed = 0,   // 아직 안 열렸거나 끝났다
+        Open = 1,     // 입구 2개가 열려 있다(아무도 안 들어감)
+        Waiting = 2,  // 한 팀이 들어가 상대를 기다린다(phaseEnd까지 없으면 보스전)
+        Pvp = 3,      // 두 팀 대결(자기장이 phase 중간부터 좁아진다)
+        Boss = 4,     // 한 팀 보스전
+        Finished = 5, // 결과 표시(winnerTeam). 잠시 뒤 Closed
+    };
+
+    enum class TeleportReason : std::uint8_t
+    {
+        RiftEnter = 1,
+        RiftExit = 2,
+    };
+
+    // 스킬 번호 = 무기 × 12 + 스탯 × 3 + 티어 + 1 (무기 0 검·1 활, 스탯 0 힘·1 민첩·2 지능·3 체력, 티어 0 초급·1 중급·2 고급)
+    enum class SkillAction : std::uint8_t
+    {
+        Learn = 1,   // 스킬 포인트 1. 빈 칸이 있고 해금 조건(스탯 5/15/25, 고급은 12레벨)을 채워야 한다
+        Upgrade = 2, // 스킬 포인트 1. 최대 3단계
+        Awaken = 3,  // 각성 포인트 1. 3단계 고급 스킬만, 스킬당 1번
+        Remove = 4,  // 쓴 포인트를 모두 돌려받는다. 전투 중(최근 5초 안에 주고받은 피해) 불가
+    };
+
+    enum class LoadoutResult : std::uint8_t
+    {
+        Ok = 0,
+        NoPoints = 1,
+        SlotsFull = 2,
+        Locked = 3,        // 스탯·레벨 조건 부족
+        NotLearned = 4,
+        MaxRank = 5,
+        InCombat = 6,
+        Invalid = 7,
+        AlreadyLearned = 8,
+        NotNow = 9,        // 매치가 끝났거나 죽어 있다
+    };
+
     struct PacketHeader
     {
         std::uint16_t size;
@@ -460,6 +511,77 @@ namespace asc::proto
         std::uint8_t levelsGained;   // 이번에 오른 레벨 수
     };
 
+    // 위치만 옮긴다(HP 그대로). 균열 입장·퇴장. 방 전체에 보낸다. 본인은 S_MoveAck의 새 상태로 재조정된다.
+    struct S_Teleport
+    {
+        PacketHeader header;
+        std::uint32_t playerId;
+        Vec3 position;
+        float yaw;
+        TeleportReason reason;
+    };
+
+    // 균열 상태. 바뀔 때와 2초마다 방 전체에 보낸다(매치만).
+    // 입구에 1초 서 있으면 들어간다(입구 하나에 한 팀, 팀마다 입구 하나, 한 판에 한 번).
+    // 전투장 자기장: [zoneShrinkStart, zoneShrinkEnd] 동안 arenaRadius → 0. 밖 피해는 zoneLate 전 zoneDamageEarly, 뒤 zoneDamageLate(초당 최대 체력 %).
+    struct S_RiftState
+    {
+        PacketHeader header;
+        RiftPhase phase;
+        std::uint8_t gateTeam[2];        // 입구를 차지한 팀(0 = 비어 있음)
+        float gateX[2], gateY[2];
+        float gateRadius;
+        float arenaX, arenaY, arenaRadius;
+        std::uint32_t phaseStartServerMs;
+        std::uint32_t phaseEndServerMs;
+        std::uint32_t zoneShrinkStartServerMs; // Pvp만. 0 = 자기장 없음
+        std::uint32_t zoneShrinkEndServerMs;
+        std::uint32_t zoneLateServerMs;
+        float zoneDamageEarly, zoneDamageLate;
+        std::uint16_t bossId;            // Boss: 보스 몬스터 id
+        std::uint8_t winnerTeam;         // Finished: 이긴 팀(0 = 없음)
+        std::uint8_t rewardStats;        // 보상 스탯 포인트(팀원 모두)
+        std::uint32_t rewardXp;          // 보상 경험치(팀원 모두, 배율 적용 전)
+    };
+
+    // 스킬 배우기·강화·각성·지우기. 서버가 확인하고 S_Loadout으로 답한다.
+    struct C_SkillCommand
+    {
+        PacketHeader header;
+        SkillAction action;
+        std::uint8_t skillNumber; // 1~24
+    };
+
+    // 스탯 포인트 분배(되돌릴 수 없다). 서버가 확인하고 S_Loadout으로 답한다.
+    struct C_StatCommand
+    {
+        PacketHeader header;
+        std::uint8_t stat;   // 0 힘, 1 민첩, 2 지능, 3 체력
+        std::uint8_t amount; // 1 이상
+    };
+
+    struct SkillSlot
+    {
+        std::uint8_t skillNumber; // 0 = 빈 칸
+        std::uint8_t rank;        // 1~3
+        std::uint8_t awakened;    // 0·1
+    };
+
+    // 본인의 스킬·스탯. 명령의 답, 입장·레벨업·균열 보상·새 판 때 본인에게만 보낸다.
+    struct S_Loadout
+    {
+        PacketHeader header;
+        std::uint32_t playerId;
+        LoadoutResult result;     // 명령의 답일 때 결과(값 알림은 Ok)
+        std::uint8_t action;      // 답한 명령(SkillAction 값, 스탯은 0x10 + stat, 값 알림 0)
+        std::uint8_t skillNumber; // 답한 명령의 스킬 번호
+        SkillSlot slots[4];
+        std::uint16_t stats[4];   // 힘·민첩·지능·체력(시작 5 + 분배)
+        std::uint8_t skillPointsLeft;
+        std::uint8_t awakeningPointsLeft;
+        std::uint16_t statPointsLeft;
+    };
+
     // 공격 범위 안에 있던 플레이어 한 명의 판정 결과. 방 전체에 보낸다.
     // attackId 0 = 자기장 피해(1초마다).
     struct S_HitResult
@@ -510,6 +632,12 @@ namespace asc::proto
     static_assert(sizeof(S_MatchState) == 37);
     static_assert(sizeof(S_PlayerDied) == 17);
     static_assert(sizeof(S_PlayerProgress) == 27);
+    static_assert(sizeof(S_Teleport) == 25);
+    static_assert(sizeof(S_RiftState) == 75);
+    static_assert(sizeof(C_SkillCommand) == 6);
+    static_assert(sizeof(C_StatCommand) == 6);
+    static_assert(sizeof(SkillSlot) == 3);
+    static_assert(sizeof(S_Loadout) == 35);
 
     // 패킷 타입 → PacketId
     template <class T> struct IdOf;
@@ -538,6 +666,11 @@ namespace asc::proto
     template <> struct IdOf<S_MatchState> { static constexpr PacketId value = PacketId::S_MatchState; };
     template <> struct IdOf<S_PlayerDied> { static constexpr PacketId value = PacketId::S_PlayerDied; };
     template <> struct IdOf<S_PlayerProgress> { static constexpr PacketId value = PacketId::S_PlayerProgress; };
+    template <> struct IdOf<S_Teleport> { static constexpr PacketId value = PacketId::S_Teleport; };
+    template <> struct IdOf<S_RiftState> { static constexpr PacketId value = PacketId::S_RiftState; };
+    template <> struct IdOf<C_SkillCommand> { static constexpr PacketId value = PacketId::C_SkillCommand; };
+    template <> struct IdOf<C_StatCommand> { static constexpr PacketId value = PacketId::C_StatCommand; };
+    template <> struct IdOf<S_Loadout> { static constexpr PacketId value = PacketId::S_Loadout; };
 
     // 헤더가 채워진 빈 패킷을 만든다. 예: auto p = Make<C_Login>();
     template <class T>

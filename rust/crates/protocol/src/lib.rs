@@ -12,7 +12,7 @@ use bytemuck::{Pod, Zeroable};
 #[cfg(not(target_endian = "little"))]
 compile_error!("프로토콜은 리틀 엔디언 전용이다.");
 
-pub const VERSION: u16 = 6;
+pub const VERSION: u16 = 7;
 pub const MAX_PACKET_SIZE: u16 = 4096;
 /// UTF-8, 널 문자 포함
 pub const NAME_LENGTH: usize = 32;
@@ -30,6 +30,14 @@ pub const DEFAULT_PORT: u16 = 7777;
 /// 서버 틱 20Hz. `SMoveBatch::server_tick` × 이 값 = 서버 시간
 pub const SERVER_TICK_MS: u32 = 50;
 pub const MAX_INPUTS_PER_PACKET: u8 = 16;
+/// 배울 수 있는 스킬 수(검·활 합쳐서)
+pub const SKILL_SLOTS: usize = 4;
+/// 배우기 1 + 강화 2
+pub const SKILL_MAX_RANK: u8 = 3;
+/// 스킬 번호 1~24 = 무기 × 12 + 스탯 × 3 + 티어 + 1
+pub const SKILL_COUNT: u8 = 24;
+/// 시작 스탯(힘·민첩·지능·체력 모두)
+pub const START_STAT: u16 = 5;
 
 /// 정수로 오가는 열거형. `from_raw`는 모르는 값이면 `None`.
 macro_rules! wire_enum {
@@ -82,6 +90,11 @@ wire_enum! {
         SMatchState = 25,
         SPlayerDied = 26,
         SPlayerProgress = 27,
+        STeleport = 28,
+        SRiftState = 29,
+        CSkillCommand = 30,
+        CStatCommand = 31,
+        SLoadout = 32,
     }
 }
 
@@ -129,6 +142,8 @@ wire_enum! {
         Heavy = 3,
         Dodge = 4,
         Dead = 5,
+        /// 서버만 쓴다: 풀숲에 숨어 받는 사람에게 보이지 않는다(위치 값은 의미 없음)
+        Hidden = 6,
     }
 }
 
@@ -177,6 +192,61 @@ wire_enum! {
         None = 0,
         Monster = 1,
         Player = 2,
+        /// 균열 승리·보스 처치 보상
+        Rift = 3,
+    }
+}
+
+wire_enum! {
+    /// 균열 단계. `SRiftState`로 알린다.
+    RiftPhase: u8 {
+        /// 아직 안 열렸거나 끝났다
+        Closed = 0,
+        /// 입구 2개가 열려 있다(아무도 안 들어감)
+        Open = 1,
+        /// 한 팀이 들어가 상대를 기다린다
+        Waiting = 2,
+        /// 두 팀 대결
+        Pvp = 3,
+        /// 한 팀 보스전
+        Boss = 4,
+        /// 결과 표시
+        Finished = 5,
+    }
+}
+
+wire_enum! {
+    TeleportReason: u8 {
+        RiftEnter = 1,
+        RiftExit = 2,
+    }
+}
+
+wire_enum! {
+    /// 스킬 명령(`CSkillCommand`)
+    SkillAction: u8 {
+        Learn = 1,
+        Upgrade = 2,
+        Awaken = 3,
+        Remove = 4,
+    }
+}
+
+wire_enum! {
+    /// 스킬·스탯 명령의 결과(`SLoadout`)
+    LoadoutResult: u8 {
+        Ok = 0,
+        NoPoints = 1,
+        SlotsFull = 2,
+        /// 스탯·레벨 조건 부족
+        Locked = 3,
+        NotLearned = 4,
+        MaxRank = 5,
+        InCombat = 6,
+        Invalid = 7,
+        AlreadyLearned = 8,
+        /// 매치가 끝났거나 죽어 있다
+        NotNow = 9,
     }
 }
 
@@ -601,6 +671,93 @@ packet! {
 }
 
 packet! {
+    /// 위치만 옮긴다(HP 그대로). 균열 입장·퇴장. 방 전체에 보낸다.
+    STeleport [25] {
+        player_id: u32,
+        position: Vec3,
+        yaw: f32,
+        /// `TeleportReason` 값
+        reason: u8,
+    }
+}
+
+packet! {
+    /// 균열 상태. 바뀔 때와 2초마다 방 전체에 보낸다(매치만).
+    SRiftState [75] {
+        /// `RiftPhase` 값
+        phase: u8,
+        /// 입구를 차지한 팀(0 = 비어 있음)
+        gate_team: [u8; 2],
+        gate_x: [f32; 2],
+        gate_y: [f32; 2],
+        gate_radius: f32,
+        arena_x: f32,
+        arena_y: f32,
+        arena_radius: f32,
+        phase_start_server_ms: u32,
+        phase_end_server_ms: u32,
+        /// Pvp만. 0 = 자기장 없음. 이 동안 arena_radius → 0
+        zone_shrink_start_server_ms: u32,
+        zone_shrink_end_server_ms: u32,
+        /// 이 시각 전 zone_damage_early, 뒤 zone_damage_late(초당 최대 체력 %)
+        zone_late_server_ms: u32,
+        zone_damage_early: f32,
+        zone_damage_late: f32,
+        /// Boss: 보스 몬스터 id
+        boss_id: u16,
+        /// Finished: 이긴 팀(0 = 없음)
+        winner_team: u8,
+        reward_stats: u8,
+        reward_xp: u32,
+    }
+}
+
+packet! {
+    /// 스킬 배우기·강화·각성·지우기
+    CSkillCommand [6] {
+        /// `SkillAction` 값
+        action: u8,
+        /// 1~24
+        skill_number: u8,
+    }
+}
+
+packet! {
+    /// 스탯 포인트 분배(되돌릴 수 없다)
+    CStatCommand [6] {
+        /// 0 힘, 1 민첩, 2 지능, 3 체력
+        stat: u8,
+        amount: u8,
+    }
+}
+
+wire_struct! {
+    SkillSlot [3] {
+        /// 0 = 빈 칸
+        skill_number: u8,
+        rank: u8,
+        awakened: u8,
+    }
+}
+
+packet! {
+    /// 본인의 스킬·스탯. 명령의 답, 입장·레벨업·균열 보상·새 판 때 본인에게만 보낸다.
+    SLoadout [35] {
+        player_id: u32,
+        /// `LoadoutResult` 값
+        result: u8,
+        /// 답한 명령(SkillAction 값, 스탯은 0x10 + stat, 값 알림 0)
+        action: u8,
+        skill_number: u8,
+        slots: [SkillSlot; 4],
+        stats: [u16; 4],
+        skill_points_left: u8,
+        awakening_points_left: u8,
+        stat_points_left: u16,
+    }
+}
+
+packet! {
     /// 공격 범위 안에 있던 플레이어 한 명의 판정 결과. attack_id 0 = 자기장 피해(1초마다).
     SHitResult [31] {
         attack_id: u32,
@@ -772,7 +929,10 @@ mod tests {
     #[test]
     fn unknown_enum_values_are_rejected() {
         assert_eq!(PacketId::from_raw(7), None);
-        assert_eq!(PacketId::from_raw(28), None);
+        assert_eq!(PacketId::from_raw(33), None);
+        assert_eq!(MoveState::from_raw(7), None);
+        assert_eq!(RiftPhase::from_raw(6), None);
+        assert_eq!(SkillAction::from_raw(0), None);
         assert_eq!(RoomMode::from_raw(2), None);
         assert_eq!(MatchPhase::from_raw(5), None);
         assert_eq!(AttackKind::from_raw(0), None);

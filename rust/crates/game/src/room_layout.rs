@@ -3,9 +3,14 @@
 use asc_movement::GROUND_Z;
 use asc_protocol::{Vec3, MAX_TEAMS};
 
-/// 현재 데모 맵(개방형 폐허 정원)의 이동 범위. 클라이언트 `AAscensionMode::ArenaHalfWidth/Depth`와 같다.
-pub const ARENA_HALF_WIDTH: f32 = 2800.0;
-pub const ARENA_HALF_DEPTH: f32 = 2400.0;
+/// 필드(배틀로얄 맵)의 이동 범위: 100m × 100m. 클라이언트 `AAscensionMode::ArenaHalfWidth/Depth`와 같다.
+/// 몬스터 증원·부활 위치는 이 안에서만 고른다.
+pub const ARENA_HALF_WIDTH: f32 = 5000.0;
+pub const ARENA_HALF_DEPTH: f32 = 5000.0;
+/// 충돌 지형 전체 범위: 필드 + 필드 북쪽 밖의 균열 전투장(중심 y 6500, 반지름 10m).
+/// 몬스터 이동·검기는 이 범위와 벽으로 막는다(필드 경계는 보이지 않는 벽이 막는다).
+pub const WORLD_HALF_WIDTH: f32 = 5000.0;
+pub const WORLD_HALF_DEPTH: f32 = 7600.0;
 
 /// 지형 검사 반지름. 클라이언트 캡슐(32)은 장애물에 파고들지 않으므로 여유를 두고 작게 본다.
 /// 도착 위치는 24cm(8cm 여유), 이동 경로는 16cm로 쓸어 본다(기둥 모서리를 스치는 정상 이동은 통과).
@@ -13,7 +18,8 @@ pub const TERRAIN_RADIUS: f32 = 24.0;
 pub const TERRAIN_SWEEP_RADIUS: f32 = 16.0;
 
 /// 매치에서 팀 기지(팀 시작 위치)가 놓이는 원의 반지름. 팀 1~4가 대각선 네 방향(45·135·225·315도)에 선다.
-pub const TEAM_BASE_RADIUS: f32 = 1700.0;
+/// 맵(CreateMap.py)의 팀 기지 표식과 같은 자리다.
+pub const TEAM_BASE_RADIUS: f32 = 4000.0;
 /// 같은 팀원 사이 간격
 pub const TEAM_MEMBER_SPACING: f32 = 150.0;
 

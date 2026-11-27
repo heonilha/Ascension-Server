@@ -1,8 +1,10 @@
 //! ascension-server [--port 7777] [--threads N] [--map data/CombatLab.txt]
-//!                  [--match-monsters 1] [--match-time-scale 1] [--match-start-teams 2] [--match-xp-scale 1]
+//!                  [--match-monsters 1] [--match-time-scale 1] [--match-rift-time-scale 1] [--match-start-teams 2] [--match-xp-scale 1]
 //!                  [--practice-monsters 1] [--practice-slam-ms 0]
 //!   --match-monsters: 매치에 서버 몬스터를 둔다(기본 켬). 0이면 플레이어끼리만
 //!   --match-time-scale: 매치 시간표(기본 36분)의 모든 시간에 곱한다. 0.1이면 약 3.6분 판(데모·시험용)
+//!   --match-rift-time-scale: 균열(대결 3분·보스전 4분·대기 1분·균열 안 부활 20초)에만 따로 곱한다. 기본은 --match-time-scale과 같다.
+//!     짧은 데모(시간 0.1)에서 균열을 제대로 해 보려면 0.5 정도로 둔다. 균열이 열리는 시각(2라운드 + 2분)은 --match-time-scale을 따른다
 //!   --match-start-teams: 이 수 이상의 팀이 들어오면 카운트다운을 시작한다(기본 2, 1이면 혼자 시험)
 //!   --match-xp-scale: 처치 경험치 배율(기본 1). 시간을 줄인 데모에서 레벨을 같은 속도로 올리려면 1 / 시간 배율
 //!   --practice-monsters: 연습 방(개발 시험용)에 서버 몬스터를 둔다(기본 켬). 0이면 빈 방
@@ -39,6 +41,7 @@ fn run() -> ExitCode {
         map: None,
     };
     let mut time_scale = 1.0f32;
+    let mut rift_time_scale: Option<f32> = None;
     let mut start_teams = options.schedule.start_teams;
     let mut map_path: Option<PathBuf> = Some(platform::find_data_file("data/CombatLab.txt"));
 
@@ -52,6 +55,7 @@ fn run() -> ExitCode {
             "--practice-monsters" | "--pve-monsters" => options.practice_monsters = value.parse::<i32>().unwrap_or(1) != 0,
             "--match-monsters" => options.match_monsters = value.parse::<i32>().unwrap_or(1) != 0,
             "--match-time-scale" => time_scale = value.parse().unwrap_or(1.0),
+            "--match-rift-time-scale" => rift_time_scale = value.parse().ok(),
             "--match-start-teams" => start_teams = value.parse().unwrap_or(start_teams),
             "--match-xp-scale" => options.xp_scale = value.parse().unwrap_or(1.0),
             "--map" => map_path = (value != "none").then(|| PathBuf::from(value)),
@@ -60,11 +64,17 @@ fn run() -> ExitCode {
     }
 
     options.schedule = MatchSchedule::scaled(time_scale);
+    if let Some(rift_scale) = rift_time_scale {
+        let open_after_round2_ms = options.schedule.rift.open_after_round2_ms;
+        options.schedule.rift = asc_game::match_rules::RiftSchedule::scaled(rift_scale);
+        options.schedule.rift.open_after_round2_ms = open_after_round2_ms;
+    }
     options.schedule.start_teams = start_teams.max(1);
     log!(
-        "매치: 시간 배율 {} (한 판 {}초), 경험치 배율 {}, {}팀 이상이면 시작, 몬스터 {}",
+        "매치: 시간 배율 {} (한 판 {}초, 균열 대결 {}초), 경험치 배율 {}, {}팀 이상이면 시작, 몬스터 {}",
         time_scale,
         options.schedule.total_ms() / 1000,
+        options.schedule.rift.pvp_ms / 1000,
         options.xp_scale,
         options.schedule.start_teams,
         if options.match_monsters { "켬" } else { "끔" }

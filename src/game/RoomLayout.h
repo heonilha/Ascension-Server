@@ -13,17 +13,17 @@ namespace asc::game
 {
     struct RoomLayout
     {
-        // 현재 데모 맵(개방형 폐허 정원)의 이동 범위. 클라이언트 AAscensionMode::ArenaHalfWidth/Depth와 같다.
-        static constexpr float kArenaHalfWidth = 2800.f;
-        static constexpr float kArenaHalfDepth = 2400.f;
+        // 필드(100m × 100m)의 이동 범위. 클라이언트 AAscensionMode::ArenaHalfWidth/Depth와 같다.
+        static constexpr float kArenaHalfWidth = 5000.f;
+        static constexpr float kArenaHalfDepth = 5000.f;
         // 지형 검사 반지름(도착 위치 / 이동 경로)
         static constexpr float kTerrainRadius = 24.f;
         static constexpr float kTerrainSweepRadius = 16.f;
         // 이동 입력 처리량 제한: 0.5초 분량까지 모아 두고, 실제 시간의 1.03배만큼 처리권이 쌓인다
         static constexpr double kMaxInputBacklog = move::kTickRate * 0.5;
         static constexpr double kInputRateTolerance = 1.03;
-        // 매치 팀 기지: 팀 1~4가 대각선 네 방향(45·135·225·315도), 반지름 17m 원 위에 선다
-        static constexpr float kTeamBaseRadius = 1700.f;
+        // 매치 팀 기지: 팀 1~4가 대각선 네 방향(45·135·225·315도), 반지름 40m 원 위에 선다
+        static constexpr float kTeamBaseRadius = 4000.f;
         static constexpr float kTeamMemberSpacing = 150.f;
 
         // 연습 방 slot번째: 클라이언트 데모의 시작 위치(-750, 0) 근처에 1.5m 간격
