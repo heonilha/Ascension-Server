@@ -84,8 +84,8 @@ try {
 
     # Golden records: what the C++ build computes now must equal the committed record the Rust tests compare against.
     $goldens = [ordered]@{
-        'movement_golden' = 'rust\crates\movement\tests\golden\movement_v5.txt' # shared movement header (FFI)
-        'game_golden'     = 'rust\crates\game\tests\golden\game_v5.txt'         # collision map + monsters (ported to Rust)
+        'movement_golden' = 'rust\crates\movement\tests\golden\movement_v6.txt' # shared movement header (FFI)
+        'game_golden'     = 'rust\crates\game\tests\golden\game_v6.txt'         # collision map + monsters (ported to Rust)
     }
     foreach ($name in $goldens.Keys) {
         $goldenFile = Join-Path $root $goldens[$name]

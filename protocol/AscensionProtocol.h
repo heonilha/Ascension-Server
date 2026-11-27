@@ -15,7 +15,7 @@
 
 namespace asc::proto
 {
-    inline constexpr std::uint16_t kVersion = 5;
+    inline constexpr std::uint16_t kVersion = 6;
     inline constexpr std::uint16_t kMaxPacketSize = 4096;
     inline constexpr std::size_t kNameLength = 32;     // UTF-8, 널 문자 포함
     inline constexpr std::uint8_t kMaxPracticePlayers = 3; // 연습 방 최대 인원
@@ -53,6 +53,7 @@ namespace asc::proto
         S_Respawn = 24,
         S_MatchState = 25,
         S_PlayerDied = 26,
+        S_PlayerProgress = 27,
     };
 
     // 방 종류. 같은 teamCode라도 모드가 다르면 다른 방이다.
@@ -115,6 +116,14 @@ namespace asc::proto
         Round = 2,     // 라운드 진행(자기장 고정, 4라운드는 계속 축소)
         Shrink = 3,    // 라운드 사이 자기장 축소
         Ended = 4,     // 최후의 1팀 결정. 잠시 뒤 Waiting으로 돌아간다
+    };
+
+    // 경험치를 얻은 이유
+    enum class ProgressReason : std::uint8_t
+    {
+        None = 0,    // 입장·초기화 때 현재 값 알림
+        Monster = 1, // 몬스터 처치
+        Player = 2,  // 플레이어 처치
     };
 
     // 사망 원인
@@ -434,6 +443,23 @@ namespace asc::proto
         std::uint32_t respawnServerMs;   // 이 시각에 부활한다. 0 = 탈락(다시 부활하지 않음)
     };
 
+    // 레벨·경험치·포인트(방 전체에 보낸다: 다른 사람 레벨도 이름표에 쓴다). 경험치를 얻었을 때, 입장했을 때(방 안 모두의 값),
+    // 매치가 시작·초기화될 때(1레벨로) 보낸다. 포인트는 받은 합이다(쓰는 것은 클라이언트 스킬·스탯 화면).
+    struct S_PlayerProgress
+    {
+        PacketHeader header;
+        std::uint32_t playerId;
+        std::uint8_t level;          // 1~20
+        std::uint32_t xp;            // 지금 레벨 안에서 모은 경험치
+        std::uint32_t xpToNext;      // 다음 레벨까지 필요한 경험치(최대 레벨이면 0)
+        std::uint8_t skillPoints;    // 받은 스킬 포인트 합(1~12레벨에 1개씩)
+        std::uint8_t awakeningPoints; // 받은 각성 포인트 합(15·17레벨)
+        std::uint16_t statPoints;    // 받은 스탯 포인트 합(레벨업마다 3)
+        std::uint32_t gainedXp;      // 이번에 얻은 경험치(0 = 값 알림만)
+        ProgressReason reason;
+        std::uint8_t levelsGained;   // 이번에 오른 레벨 수
+    };
+
     // 공격 범위 안에 있던 플레이어 한 명의 판정 결과. 방 전체에 보낸다.
     // attackId 0 = 자기장 피해(1초마다).
     struct S_HitResult
@@ -483,6 +509,7 @@ namespace asc::proto
     static_assert(sizeof(S_HitResult) == 31);
     static_assert(sizeof(S_MatchState) == 37);
     static_assert(sizeof(S_PlayerDied) == 17);
+    static_assert(sizeof(S_PlayerProgress) == 27);
 
     // 패킷 타입 → PacketId
     template <class T> struct IdOf;
@@ -510,6 +537,7 @@ namespace asc::proto
     template <> struct IdOf<S_HitResult> { static constexpr PacketId value = PacketId::S_HitResult; };
     template <> struct IdOf<S_MatchState> { static constexpr PacketId value = PacketId::S_MatchState; };
     template <> struct IdOf<S_PlayerDied> { static constexpr PacketId value = PacketId::S_PlayerDied; };
+    template <> struct IdOf<S_PlayerProgress> { static constexpr PacketId value = PacketId::S_PlayerProgress; };
 
     // 헤더가 채워진 빈 패킷을 만든다. 예: auto p = Make<C_Login>();
     template <class T>

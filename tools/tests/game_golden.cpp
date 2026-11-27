@@ -2,7 +2,7 @@
 //
 // ascension_game_golden <data/CombatLab.txt> <출력 파일>
 //
-// 기록은 rust/crates/game/tests/golden/game_v5.txt에 저장해 두고, Rust 시험(tests/golden.rs)이 같은 입력을 돌려 비교한다.
+// 기록은 rust/crates/game/tests/golden/game_v6.txt에 저장해 두고, Rust 시험(tests/golden.rs)이 같은 입력을 돌려 비교한다.
 // 입력 만드는 방법을 바꾸면 tests/golden.rs도 똑같이 바꾼다. 규칙을 일부러 고쳤다면 기록을 다시 만든다(Test.ps1 -UpdateGolden).
 // 몬스터 시나리오는 증원을 끄고 자리를 직접 정한다(증원 난수는 두 구현이 다르다).
 #include "game/CollisionMap.h"

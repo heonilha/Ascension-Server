@@ -13,6 +13,7 @@ use crate::session::{Buffer, SessionHandle};
 use asc_game::combat_rules::{allowed_rewind_ms, capacity_for, clamp_press_time, in_iframe, rules_for, COOLDOWN_SLACK_MS};
 use asc_game::match_rules::{self, running_phase, MatchSchedule, RunningPhase, ZONE_CENTER, ZONE_RADIUS};
 use asc_game::monsters::{tuning, MonsterEvents, MonsterField, MonsterPlayer};
+use asc_game::progression::{self, Progress, MONSTER_XP};
 use asc_game::rng::Rng;
 use asc_game::room_layout::{practice_spawn_position, team_spawn_position, ARENA_HALF_DEPTH, ARENA_HALF_WIDTH};
 use asc_game::CollisionMap;
@@ -92,6 +93,8 @@ pub struct RoomOptions {
     pub match_monsters: bool,
     /// 매치 시간표(라운드·축소·부활 대기). 기본은 기획안의 36분. 데모·시험은 `MatchSchedule::scaled`로 줄인다.
     pub schedule: MatchSchedule,
+    /// 처치 경험치 배율(1 = 기본). 시간을 줄인 데모에서 레벨이 같은 속도로 오르게 키운다. 0이면 1로 본다.
+    pub xp_scale: f32,
     /// 충돌 지형. 있으면 이동(장애물 안·통과)과 공격(엄폐)을 지형으로도 검사한다. 모든 방이 같은 것을 읽기만 한다.
     pub map: Option<Arc<CollisionMap>>,
 }
@@ -196,6 +199,8 @@ struct Member {
     respawn_at_ms: Option<u32>,
     /// 매치: 4라운드에 죽어 탈락했다(이 판에서는 부활하지 않는다)
     eliminated: bool,
+    /// 레벨·경험치·포인트(한 판 동안 유지, 죽어도 잃지 않는다)
+    progress: Progress,
     /// 0 = 아직 모름
     rtt_ms: u32,
     /// 최근 회피 몇 개(판정 유예 동안 필요한 만큼)
@@ -324,6 +329,22 @@ fn empty_world() -> &'static World {
 
 fn buffer<T: Packet>(packet: &T) -> Buffer {
     encode(packet).into()
+}
+
+fn progress_packet(member: &Member, gained_xp: u32, reason: ProgressReason, levels_gained: u8) -> SPlayerProgress {
+    let p = member.progress;
+    let mut packet = make::<SPlayerProgress>();
+    packet.player_id = member.player_id;
+    packet.level = p.level;
+    packet.xp = p.xp;
+    packet.xp_to_next = progression::xp_to_next(p.level);
+    packet.skill_points = p.skill_points;
+    packet.awakening_points = p.awakening_points;
+    packet.stat_points = p.stat_points;
+    packet.gained_xp = gained_xp;
+    packet.reason = reason.raw();
+    packet.levels_gained = levels_gained;
+    packet
 }
 
 fn to_info(member: &Member) -> PlayerInfo {
@@ -508,6 +529,7 @@ impl Room {
             protected_until_ms: 0,
             respawn_at_ms: None,
             eliminated: false,
+            progress: Progress::default(),
             rtt_ms: 0,
             dodges: VecDeque::new(),
             last_attack_ms: 0,
@@ -539,6 +561,39 @@ impl Room {
         self.members.push(member);
         if self.mode == RoomMode::Match {
             session.send(buffer(&self.match_state(now_ms)));
+        }
+        // 새로 온 사람에게 방 안 모두의 레벨, 다른 사람들에게 새로 온 사람의 레벨
+        for other in &self.members {
+            if other.player_id != session.id() {
+                session.send(buffer(&progress_packet(other, 0, ProgressReason::None, 0)));
+            }
+        }
+        let newcomer = self.members.last().expect("방금 넣었다");
+        self.broadcast(buffer(&progress_packet(newcomer, 0, ProgressReason::None, 0)));
+    }
+
+    /// 경험치를 주고 모두에게 알린다(배율 적용, 최소 1).
+    fn award_xp(&mut self, player_id: u32, base: u32, reason: ProgressReason) {
+        let Some(index) = self.find(player_id) else { return };
+        let scale = if self.options.xp_scale > 0.0 { self.options.xp_scale } else { 1.0 };
+        let amount = ((base as f32 * scale).round() as u32).max(1);
+        let team_code = self.team_code;
+        let member = &mut self.members[index];
+        let levels = member.progress.gain(amount);
+        if levels > 0 {
+            log!("방 {} 레벨업: {} → {}레벨", team_code, member.name, member.progress.level);
+        }
+        let packet = progress_packet(member, amount, reason, levels);
+        self.broadcast(buffer(&packet));
+    }
+
+    /// 한 판을 새로 시작할 때 모두 1레벨로
+    fn reset_progress(&mut self) {
+        for member in &mut self.members {
+            member.progress = Progress::default();
+        }
+        for member in &self.members {
+            self.broadcast(buffer(&progress_packet(member, 0, ProgressReason::None, 0)));
         }
     }
 
@@ -927,6 +982,7 @@ impl Room {
         self.next_zone_damage_ms = now_ms + ZONE_DAMAGE_INTERVAL_MS;
         log!("방 {} 매치 시작: {}팀 {}명, 총 {}초", self.team_code, self.started_teams, self.members.len(), self.options.schedule.total_ms() / 1000);
         self.revive_everyone_at_bases(now_ms);
+        self.reset_progress(); // 시작 전에 모은 경험치는 이어지지 않는다
     }
 
     /// 결과 표시가 끝났다: 다음 판을 위해 대기로 돌아간다.
@@ -935,6 +991,7 @@ impl Room {
         self.started_teams = 0;
         log!("방 {} 매치 초기화 → 대기", self.team_code);
         self.revive_everyone_at_bases(now_ms);
+        self.reset_progress();
     }
 
     fn revive_everyone_at_bases(&mut self, now_ms: u32) {
@@ -1162,6 +1219,8 @@ impl Room {
             self.broadcast(buffer(&packet));
             if hit.hp_after <= 0.0 {
                 self.monster_attacks.remove(&hit.monster_id);
+                // 처치한 사람(막타)에게 경험치
+                self.award_xp(hit.attacker_id, MONSTER_XP[(hit.kind as usize).min(2)], ProgressReason::Monster);
             }
         }
         for end in &events.wave_ends {
@@ -1290,6 +1349,14 @@ impl Room {
                 AttackKind::Slash => (DeathCause::Player, attack.attacker_id),
                 _ => (DeathCause::Monster, 0),
             };
+            if cause == DeathCause::Player {
+                // 처치 경험치: 상대 레벨이 높을수록 많다
+                let victim_level = self.members[index].progress.level;
+                if let Some(killer_index) = self.find(killer) {
+                    let xp = progression::player_kill_xp(self.members[killer_index].progress.level, victim_level);
+                    self.award_xp(killer, xp, ProgressReason::Player);
+                }
+            }
             self.on_death(index, cause, killer, server_time_ms(), true);
         }
     }
@@ -1532,6 +1599,49 @@ mod tests {
         room.update_match(round4 + 350);
         assert_eq!(room.stage, Stage::Waiting);
         assert!(room.members.iter().all(|m| !m.dead && !m.eliminated && m.hp == MAX_HP));
+    }
+
+    #[test]
+    fn kills_give_xp_and_a_new_match_resets_levels() {
+        let mut room = match_room();
+        let mut watcher = join(&mut room, 1, 1);
+        join(&mut room, 2, 2);
+        let t0 = start(&mut room, 0);
+        received_ids(&mut watcher);
+        // 몬스터: 지휘관 막타 40
+        room.award_xp(1, MONSTER_XP[2], ProgressReason::Monster);
+        assert_eq!((member(&room, 1).progress.level, member(&room, 1).progress.xp), (2, 20));
+        assert!(received_ids(&mut watcher).contains(&PacketId::SPlayerProgress.raw()));
+        // 플레이어 처치: 근접 공격으로 HP 0
+        for (id, x) in [(1, 0.0), (2, 100.0)] {
+            place(&mut room, id, x, 0.0);
+        }
+        let victim = room.find(2).unwrap();
+        room.members[victim].hp = 10.0;
+        room.members[victim].protected_until_ms = 0; // 시작 직후 보호 해제
+        let mut attack =
+            ActiveAttack::new(AttackKind::Slash, t0, Vec3 { x: 0.0, y: 0.0, z: GROUND_Z }, Vec3 { x: 100.0, y: 0.0, z: GROUND_Z }, SLASH_RADIUS, SLASH_DAMAGE);
+        attack.attacker_id = 1;
+        attack.attacker_team = 1;
+        room.attacks.push(attack);
+        room.update_combat(t0 + 1000);
+        assert!(member(&room, 2).dead);
+        // 2레벨이 1레벨을 잡으면 20 + 10 = 30 → 2레벨 20 + 30 = 50 ≥ 35 → 3레벨 15
+        assert_eq!((member(&room, 1).progress.level, member(&room, 1).progress.xp), (3, 15));
+        // 다음 판(결과 표시 뒤 초기화)에는 모두 1레벨
+        room.stage = Stage::Ended { start_ms: t0, end_ms: t0 + 2000, winner: 1, round: 1 };
+        room.update_match(t0 + 2000);
+        assert!(room.members.iter().all(|m| m.progress == Progress::default()));
+    }
+
+    #[test]
+    fn xp_scale_multiplies_kill_xp() {
+        let mut room = match_room();
+        room.options.xp_scale = 3.0;
+        join(&mut room, 1, 1);
+        room.award_xp(1, 8, ProgressReason::Monster);
+        assert_eq!((member(&room, 1).progress.level, member(&room, 1).progress.xp), (2, 4));
+        // 24 - 20
     }
 
     #[test]

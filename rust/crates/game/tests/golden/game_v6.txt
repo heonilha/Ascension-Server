@@ -1,4 +1,4 @@
-# game golden: protocol v5, 45 obstacles
+# game golden: protocol v6, 45 obstacles
 collision grid blocked 566 high 86 solid 757 pushed 757 hash a7bb152a
 collision pairs sweep 1047 line 884 hash e80d8e84
 monsters tick 50 count 11 killed 1 waves 2 hash 1db654dd

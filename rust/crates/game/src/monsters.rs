@@ -157,6 +157,8 @@ pub struct DashTouch {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hit {
     pub monster_id: u16,
+    /// 0 망령 검병, 1 폭주 망령, 2 망령 지휘관(처치 경험치 계산용)
+    pub kind: u8,
     pub attacker_id: u32,
     pub damage: f32,
     pub hp_after: f32,
@@ -478,7 +480,7 @@ impl MonsterField {
         };
         let monster = &mut self.monsters[index];
         monster.hp = (monster.hp - damage).max(0.0);
-        events.hits.push(Hit { monster_id: monster.id, attacker_id, damage, hp_after: monster.hp, x: monster.x, y: monster.y });
+        events.hits.push(Hit { monster_id: monster.id, kind: monster.kind, attacker_id, damage, hp_after: monster.hp, x: monster.x, y: monster.y });
 
         if monster.hp <= 0.0 {
             if monster.phase == MonsterState::Tell {

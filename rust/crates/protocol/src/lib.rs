@@ -12,7 +12,7 @@ use bytemuck::{Pod, Zeroable};
 #[cfg(not(target_endian = "little"))]
 compile_error!("프로토콜은 리틀 엔디언 전용이다.");
 
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 6;
 pub const MAX_PACKET_SIZE: u16 = 4096;
 /// UTF-8, 널 문자 포함
 pub const NAME_LENGTH: usize = 32;
@@ -81,6 +81,7 @@ wire_enum! {
         SRespawn = 24,
         SMatchState = 25,
         SPlayerDied = 26,
+        SPlayerProgress = 27,
     }
 }
 
@@ -166,6 +167,16 @@ wire_enum! {
         Shrink = 3,
         /// 최후의 1팀 결정. 잠시 뒤 Waiting으로 돌아간다
         Ended = 4,
+    }
+}
+
+wire_enum! {
+    /// 경험치를 얻은 이유
+    ProgressReason: u8 {
+        /// 입장·초기화 때 현재 값 알림
+        None = 0,
+        Monster = 1,
+        Player = 2,
     }
 }
 
@@ -569,6 +580,27 @@ packet! {
 }
 
 packet! {
+    /// 레벨·경험치·포인트. 방 전체에 보낸다(경험치를 얻었을 때, 입장했을 때 방 안 모두의 값, 매치 시작·초기화 때).
+    SPlayerProgress [27] {
+        player_id: u32,
+        level: u8,
+        /// 지금 레벨 안에서 모은 경험치
+        xp: u32,
+        /// 다음 레벨까지(최대 레벨이면 0)
+        xp_to_next: u32,
+        /// 받은 포인트 합
+        skill_points: u8,
+        awakening_points: u8,
+        stat_points: u16,
+        /// 이번에 얻은 경험치(0 = 값 알림만)
+        gained_xp: u32,
+        /// `ProgressReason` 값
+        reason: u8,
+        levels_gained: u8,
+    }
+}
+
+packet! {
     /// 공격 범위 안에 있던 플레이어 한 명의 판정 결과. attack_id 0 = 자기장 피해(1초마다).
     SHitResult [31] {
         attack_id: u32,
@@ -740,7 +772,7 @@ mod tests {
     #[test]
     fn unknown_enum_values_are_rejected() {
         assert_eq!(PacketId::from_raw(7), None);
-        assert_eq!(PacketId::from_raw(27), None);
+        assert_eq!(PacketId::from_raw(28), None);
         assert_eq!(RoomMode::from_raw(2), None);
         assert_eq!(MatchPhase::from_raw(5), None);
         assert_eq!(AttackKind::from_raw(0), None);
